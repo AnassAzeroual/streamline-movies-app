@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Streamline" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/streamline_black</item>
+        <item name="android:colorAccent">@color/streamline_gold</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:fontFamily">@font/manrope</item>
+    </style>
+
+    <style name="Theme.Streamline.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/streamline_black</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_splash</item>
+        <item name="windowSplashScreenAnimationDuration">450</item>
+        <item name="postSplashScreenTheme">@style/Theme.Streamline</item>
+    </style>
+</resources>
