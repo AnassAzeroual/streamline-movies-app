@@ -5,10 +5,10 @@ import java.io.RandomAccessFile
 import kotlin.math.max
 import kotlin.math.min
 
-/**
- * Best-effort MP4/MOV top-level atom inspection. It is intentionally read-only and bounded:
- * no full-file scan and no player-thread work.
- */
+
+
+
+
 object Mp4MetadataInspector {
     const val HEAD_WINDOW_BYTES = 2L * 1024L * 1024L
     const val TAIL_WINDOW_BYTES = 8L * 1024L * 1024L
@@ -73,8 +73,8 @@ object Mp4MetadataInspector {
             }
             if (size < headerSize) return null
             if (type == "moov") {
-                // The moov header is enough to know where the atom starts. It may extend
-                // beyond this bounded head window, in which case the player will request it.
+                
+                
                 return Atom(baseOffset + cursor, size)
             }
             if (cursor + size > bytes.size) return null

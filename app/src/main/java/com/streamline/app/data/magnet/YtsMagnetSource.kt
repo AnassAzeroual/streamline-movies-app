@@ -12,10 +12,10 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
 
-/**
- * Reads the public YTS index. Mirrors are tried in order so one blocked domain does not take the
- * archive down; the working mirror is remembered for the rest of the session.
- */
+
+
+
+
 class YtsMagnetSource(
     private val client: OkHttpClient,
     private val hosts: List<String> = DEFAULT_HOSTS,

@@ -17,7 +17,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
 
-/** The Pirate Bay through the public apibay.org JSON endpoint. */
+
 class PirateBayMagnetSource(
     private val client: OkHttpClient,
 ) : MagnetSourceProvider {

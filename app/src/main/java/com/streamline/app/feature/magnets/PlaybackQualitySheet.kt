@@ -77,7 +77,10 @@ fun PlaybackQualitySheet(
 ) {
     val context = LocalContext.current
     val releases = remember(item.id) {
-        item.playableReleases().sortedByDescending { it.videoQuality.height }
+        item.playableReleases().sortedWith(
+            compareByDescending<MagnetRelease> { it.videoQuality.height }
+                .thenBy { it.isMatroska },
+        )
     }
     val screenQuality = remember { PlaybackQualityAdvisor.screenQuality(context) }
     val networkQuality = remember { PlaybackQualityAdvisor.networkQuality(context) }
@@ -86,7 +89,7 @@ fun PlaybackQualitySheet(
         if (action == QualityAction.PLAY) {
             QualityRules.choose(releases, screenQuality, networkQuality)
         } else {
-            // A download can exceed the screen resolution; use the connection as the only cap.
+            
             QualityRules.choose(releases, VideoQuality.UHD_2160, networkQuality)
         }
     }
@@ -420,6 +423,13 @@ private fun QualityRow(
                     if (bestFit) {
                         Spacer(Modifier.width(7.dp))
                         MetaPill(text = "Best fit", tone = StreamlineColors.Success)
+                    }
+                    release.containerLabel?.let { container ->
+                        Spacer(Modifier.width(7.dp))
+                        MetaPill(
+                            text = if (release.isMatroska) "MKV · slower seek" else container,
+                            tone = StreamlineColors.TextTertiary,
+                        )
                     }
                 }
                 val meta = listOfNotNull(

@@ -13,3 +13,7 @@ artifacts/
 *.jks
 *.keystore
 .DS_Store
+/*.log
+/*.png
+/*.xml
+/*.txt

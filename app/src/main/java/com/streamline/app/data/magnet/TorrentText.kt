@@ -2,7 +2,7 @@ package com.streamline.app.data.magnet
 
 import java.util.Locale
 
-/** Title and size helpers shared by the non-YTS providers. */
+
 object TorrentText {
     private val YEAR = Regex("""\b(19\d{2}|20\d{2})\b""")
     private val QUALITY = Regex("""(?i)\b(2160p|1080p|720p|480p|4k|uhd)\b""")
@@ -63,6 +63,11 @@ object TorrentText {
         val value = title.lowercase(Locale.US)
         if (SOFTWARE_TOKENS.any { value.contains(it) }) return false
         return quality(title) != null || VIDEO_TOKENS.any { value.contains(it) }
+    }
+
+    fun isAv1(title: String): Boolean {
+        val value = title.lowercase(Locale.US)
+        return value.contains("av1") || value.contains("av01")
     }
 
     fun isVideoCategory(category: String?): Boolean {

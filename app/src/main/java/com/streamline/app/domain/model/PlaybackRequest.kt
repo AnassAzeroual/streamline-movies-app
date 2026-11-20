@@ -1,9 +1,15 @@
 package com.streamline.app.domain.model
 
-/**
- * A one-shot handoff from a magnet listing to the player. It carries enough display metadata
- * for the player to stand on its own without any external catalog lookup.
- */
+
+data class PlaybackAlternative(
+    val magnetUrl: String,
+    val torrentUrl: String? = null,
+    val quality: String? = null,
+    val sourceLabel: String? = null,
+    val seeds: Int? = null,
+    val sizeLabel: String? = null,
+)
+
 data class PlaybackRequest(
     val id: String,
     val title: String,
@@ -12,4 +18,6 @@ data class PlaybackRequest(
     val posterUrl: String? = null,
     val sourceLabel: String? = null,
     val quality: String? = null,
+    val videoFileIndex: Int? = null,
+    val alternatives: List<PlaybackAlternative> = emptyList(),
 )

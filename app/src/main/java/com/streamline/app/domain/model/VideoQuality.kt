@@ -2,7 +2,7 @@ package com.streamline.app.domain.model
 
 import java.util.Locale
 
-/** The five quality buckets used by the archive's playback picker. */
+
 enum class VideoQuality(
     val height: Int,
     val label: String,

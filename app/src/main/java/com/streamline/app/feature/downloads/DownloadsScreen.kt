@@ -57,6 +57,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -92,6 +94,7 @@ import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.Settings
 import android.widget.Toast
+import com.streamline.app.core.logging.AppLog
 import java.util.Locale
 import kotlinx.coroutines.launch
 
@@ -136,11 +139,26 @@ fun DownloadsRoute(
     }
     DownloadsScreen(
         downloads = downloads,
-        onBack = onBack,
-        onOpenMagnets = onOpenMagnets,
-        onPause = container.downloadManager::pause,
-        onResume = container.downloadManager::resume,
-        onRemove = container.downloadManager::remove,
+        onBack = {
+            AppLog.event("UI", "downloads_back")
+            onBack()
+        },
+        onOpenMagnets = {
+            AppLog.event("UI", "downloads_open_archive")
+            onOpenMagnets()
+        },
+        onPause = { id ->
+            AppLog.event("DOWNLOAD", "pause_click", fields = mapOf("id" to id))
+            container.downloadManager.pause(id)
+        },
+        onResume = { id ->
+            AppLog.event("DOWNLOAD", "resume_click", fields = mapOf("id" to id))
+            container.downloadManager.resume(id)
+        },
+        onRemove = { id ->
+            AppLog.event("DOWNLOAD", "remove_click", fields = mapOf("id" to id))
+            container.downloadManager.remove(id)
+        },
         directStorageAvailable = directStorage,
         onEnableDirectStorage = {
             when {
@@ -158,8 +176,15 @@ fun DownloadsRoute(
             }
         },
         onSaveToPhone = { id ->
+            AppLog.event("DOWNLOAD", "export_click", fields = mapOf("id" to id))
             scope.launch {
                 val result = container.downloadManager.exportToPublic(id)
+                AppLog.event(
+                    "DOWNLOAD",
+                    if (result.isSuccess) "export_success" else "export_failed",
+                    message = result.exceptionOrNull()?.message.orEmpty(),
+                    fields = mapOf("id" to id),
+                )
                 Toast.makeText(
                     context,
                     result.fold(
@@ -171,6 +196,7 @@ fun DownloadsRoute(
             }
         },
         onOpenFile = { item ->
+            AppLog.event("DOWNLOAD", "open_folder", fields = mapOf("id" to item.id))
             val publicRoot = File(
                 Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
                 "Streamline",
@@ -235,6 +261,10 @@ fun DownloadsScreen(
     val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val isTv = isTelevision()
+    val backFocus = remember { FocusRequester() }
+    LaunchedEffect(isTv) {
+        if (isTv) runCatching { backFocus.requestFocus() }
+    }
     val edgePadding = tvEdgePadding(isTv)
     val headerOffset = if (isTv) 96.dp else 66.dp
     var removeTarget by remember { mutableStateOf<DownloadItem?>(null) }
@@ -353,6 +383,10 @@ private fun DownloadsTopBar(
     modifier: Modifier = Modifier,
 ) {
     val isTv = isTelevision()
+    val backFocus = remember { FocusRequester() }
+    LaunchedEffect(isTv) {
+        if (isTv) runCatching { backFocus.requestFocus() }
+    }
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -381,6 +415,7 @@ private fun DownloadsTopBar(
                 contentDescription = "Back",
                 onClick = onBack,
                 size = if (isTv) 48.dp else 42.dp,
+                modifier = Modifier.focusRequester(backFocus),
             )
             Spacer(Modifier.width(14.dp))
             StreamlineWordmark(compact = true)

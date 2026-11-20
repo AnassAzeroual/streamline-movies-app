@@ -80,6 +80,25 @@ class QualityRulesTest {
     }
 
     @Test
+    fun `prefers mp4 over mkv at the same quality`() {
+        val mk = MagnetRelease(
+            magnetUrl = "magnet:?xt=urn:btih:" + "A".repeat(40) + "&dn=Movie.1080p.mkv",
+            quality = "1080p",
+            seeds = 50,
+        )
+        val mp4 = MagnetRelease(
+            magnetUrl = "magnet:?xt=urn:btih:" + "B".repeat(40) + "&dn=Movie.1080p.mp4",
+            quality = "1080p",
+            seeds = 10,
+        )
+
+        assertEquals(
+            mp4.magnetUrl,
+            QualityRules.choose(listOf(mk, mp4), VideoQuality.FHD_1080, null)?.magnetUrl,
+        )
+    }
+
+    @Test
     fun `quality labels match the user-facing buckets`() {
         assertEquals("480p / SD", VideoQuality.SD_480.displayLabel)
         assertEquals("720p / HD", VideoQuality.HD_720.displayLabel)

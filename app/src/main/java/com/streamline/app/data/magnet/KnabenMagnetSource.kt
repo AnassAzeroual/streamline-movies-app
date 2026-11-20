@@ -16,10 +16,10 @@ import java.io.IOException
 import java.net.URLEncoder
 import java.util.Locale
 
-/**
- * Knaben is a public search engine over several torrent trackers. Its result table links the
- * magnet directly, so no second detail-page fetch is needed.
- */
+
+
+
+
 class KnabenMagnetSource(
     private val client: OkHttpClient,
 ) : MagnetSourceProvider {

@@ -11,6 +11,7 @@ import android.provider.MediaStore
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import com.streamline.app.core.logging.AppLog
 import com.streamline.app.core.torrent.TrackerLists
 import com.streamline.app.domain.model.PlaybackRequest
 import kotlinx.coroutines.CancellationException
@@ -33,6 +34,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.libtorrent4j.AddTorrentParams
+import org.libtorrent4j.Priority
 import org.libtorrent4j.AlertListener
 import org.libtorrent4j.SessionManager
 import org.libtorrent4j.SessionParams
@@ -52,10 +54,10 @@ import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-/**
- * App-scoped torrent download queue. Playback has its own sequential streaming session; this
- * manager downloads complete torrents and keeps a small persisted queue for the Downloads page.
- */
+
+
+
+
 class TorrentDownloadManager(private val appContext: Context) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -63,8 +65,8 @@ class TorrentDownloadManager(private val appContext: Context) {
     private val active = ConcurrentHashMap<String, ActiveDownload>()
     private val exporting = ConcurrentHashMap.newKeySet<String>()
     private val commandMutex = Mutex()
-    // Internal storage avoids Android's FUSE/MediaProvider path, which is fragile for the
-    // native torrent writer (and crashed the emulator's MediaProvider during testing).
+    
+    
     private val privateDownloadsRoot = File(appContext.filesDir, "downloads")
     private val publicDownloadsRoot = File(
         Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
@@ -171,17 +173,68 @@ class TorrentDownloadManager(private val appContext: Context) {
         ).toString()
     }.getOrNull()
 
-    fun enqueue(request: PlaybackRequest): String {
+    fun enqueue(
+        request: PlaybackRequest,
+        selectedFileIndexes: List<Int> = emptyList(),
+    ): String {
         val id = infoHash(request.magnetUrl) ?: UUID.randomUUID().toString()
+        AppLog.event(
+            "DOWNLOAD",
+            "enqueue",
+            fields = mapOf(
+                "id" to id,
+                "title" to request.title,
+                "quality" to request.quality,
+                "source" to request.sourceLabel,
+                "selectedFiles" to selectedFileIndexes.size,
+            ),
+        )
         scope.launch {
-            commandMutex.withLock { enqueueLocked(request, id) }
+            commandMutex.withLock { enqueueLocked(request, id, selectedFileIndexes) }
         }
         return id
     }
 
-    private fun enqueueLocked(request: PlaybackRequest, id: String) {
+    suspend fun inspectFiles(request: PlaybackRequest): Result<List<DownloadFileOption>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val manager = ensureSession()
+                metadataDir.mkdirs()
+                val metadata = manager.fetchMagnet(
+                    TrackerLists.withTrackers(request.magnetUrl),
+                    METADATA_TIMEOUT_SECONDS,
+                    metadataDir,
+                ) ?: error("Could not find peers for this magnet.")
+                val info = TorrentInfo.bdecode(metadata)
+                if (!info.isValid) error("The torrent metadata is invalid.")
+                val files = info.files()
+                (0 until files.numFiles()).mapNotNull { index ->
+                    if (files.padFileAt(index)) return@mapNotNull null
+                    val path = files.filePath(index)
+                    val extension = path.substringAfterLast('.', "").lowercase()
+                    DownloadFileOption(
+                        index = index,
+                        path = path,
+                        size = files.fileSize(index),
+                        isVideo = extension in VIDEO_EXTENSIONS,
+                        isSubtitle = extension in SUBTITLE_EXTENSIONS,
+                    )
+                }
+            }
+        }
+
+    private fun enqueueLocked(
+        request: PlaybackRequest,
+        id: String,
+        selectedFileIndexes: List<Int>,
+    ) {
         val existing = current(id)
         if (existing != null) {
+            AppLog.event(
+                "DOWNLOAD",
+                "enqueue_existing",
+                fields = mapOf("id" to id, "status" to existing.status.name),
+            )
             if (existing.canResume) resumeLocked(id)
             return
         }
@@ -192,6 +245,7 @@ class TorrentDownloadManager(private val appContext: Context) {
             posterUrl = request.posterUrl,
             sourceLabel = request.sourceLabel,
             quality = request.quality,
+            selectedFileIndexes = selectedFileIndexes,
             status = DownloadStatus.QUEUED,
         )
         _downloads.update { current -> sort(listOf(item) + current) }
@@ -367,6 +421,45 @@ class TorrentDownloadManager(private val appContext: Context) {
         }
     }
 
+    private fun extensionOf(path: String): String =
+        path.substringAfterLast('.', "").lowercase()
+
+    private fun defaultDownloadIndexes(info: TorrentInfo): List<Int> {
+        val files = info.files()
+        val videos = mutableListOf<Int>()
+        val subtitles = mutableListOf<Int>()
+        for (index in 0 until files.numFiles()) {
+            if (files.padFileAt(index)) continue
+            val path = files.filePath(index)
+            val extension = extensionOf(path)
+            when {
+                extension in VIDEO_EXTENSIONS && !isExtraVideo(path) -> videos += index
+                extension in SUBTITLE_EXTENSIONS -> subtitles += index
+            }
+        }
+        return buildList {
+            addAll(videos)
+            addAll(subtitles.take(8))
+        }
+    }
+
+    private fun isExtraVideo(path: String): Boolean {
+        val normalized = path.lowercase()
+        val name = normalized.substringAfterLast('/')
+        return normalized.contains("/extras/") ||
+            normalized.startsWith("extras/") ||
+            normalized.contains("/bd menus/") ||
+            normalized.startsWith("bd menus/") ||
+            normalized.contains("/drama cds/") ||
+            normalized.contains("/animate benefits/") ||
+            normalized.contains("creditless") ||
+            normalized.contains("cast credit") ||
+            name.contains("trailer") ||
+            name.contains("sample") ||
+            name.contains("teaser") ||
+            name.contains("menu")
+    }
+
     private fun selectDownloadFile(info: TorrentInfo): String {
         val files = info.files()
         var bestPath: String? = null
@@ -436,17 +529,28 @@ class TorrentDownloadManager(private val appContext: Context) {
                 val info = TorrentInfo.bdecode(metadata)
                 if (!info.isValid) throw DownloadFailure("The torrent metadata is invalid.")
                 val saveDir = File(downloadRoot(), id).apply { mkdirs() }
-                session.totalBytes = info.totalSize()
+                val files = info.files()
+                val selectedIndexes = item.selectedFileIndexes
+                    .filter { it in 0 until files.numFiles() && !files.padFileAt(it) }
+                    .ifEmpty { defaultDownloadIndexes(info) }
+                val selectedBytes = selectedIndexes.sumOf { files.fileSize(it) }
+                session.totalBytes = selectedBytes
                 session.manager = manager
 
                 val canonicalSaveDir = saveDir.canonicalFile
-                val selectedFile = File(canonicalSaveDir, selectDownloadFile(info)).canonicalFile
+                val selectedPaths = selectedIndexes.map { files.filePath(it) }
+                val selectedFile = selectedPaths
+                    .firstOrNull { extensionOf(it) in VIDEO_EXTENSIONS }
+                    ?.let { File(canonicalSaveDir, it).canonicalFile }
+                    ?: File(canonicalSaveDir, selectDownloadFile(info)).canonicalFile
                 if (!selectedFile.path.startsWith(canonicalSaveDir.path + File.separator)) {
                     throw DownloadFailure("The torrent contains an unsafe file path.")
                 }
+                val priorities = Priority.array(Priority.IGNORE, files.numFiles())
+                selectedIndexes.forEach { priorities[it] = Priority.DEFAULT }
                 update(id) {
                     it.copy(
-                        totalBytes = info.totalSize(),
+                        totalBytes = selectedBytes,
                         savedPath = selectedFile.absolutePath,
                     )
                 }
@@ -455,7 +559,7 @@ class TorrentDownloadManager(private val appContext: Context) {
                     info,
                     saveDir,
                     resumeFile.takeIf { it.isFile },
-                    null,
+                    priorities,
                     null,
                     TorrentFlags.NEED_SAVE_RESUME,
                 )
@@ -473,6 +577,16 @@ class TorrentDownloadManager(private val appContext: Context) {
                 handle.resume()
                 update(id) { it.copy(status = DownloadStatus.DOWNLOADING, error = null) }
                 persist()
+                AppLog.event(
+                    "DOWNLOAD",
+                    "started",
+                    fields = mapOf(
+                        "id" to id,
+                        "name" to info.name(),
+                        "size" to selectedBytes,
+                        "files" to selectedIndexes.size,
+                    ),
+                )
                 Log.i(TAG, "Download started: " + info.name())
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -492,6 +606,12 @@ class TorrentDownloadManager(private val appContext: Context) {
                             )
                         }
                         persist()
+                        AppLog.exception(
+                            "DOWNLOAD",
+                            "start_failed",
+                            error,
+                            fields = mapOf("id" to id),
+                        )
                     }
                 }
             } finally {
@@ -600,19 +720,24 @@ class TorrentDownloadManager(private val appContext: Context) {
             markComplete(session.id)
             persist()
             syncForegroundService()
+            AppLog.event(
+                "DOWNLOAD",
+                "completed",
+                fields = mapOf("id" to session.id, "title" to item.title),
+            )
             Log.i(TAG, "Download complete: " + item.title)
         }
-        // Publish whenever a private copy still exists, even if storage permission was granted
-        // between start and completion.
+        
+        
         if (File(privateDownloadsRoot, session.id).exists()) {
             scope.launch { exportInternal(session.id, deleteInternal = true) }
         }
     }
 
-    /**
-     * Publishes a completed download to MediaStore Downloads/Streamline. Used automatically after
-     * completion and exposed to the Downloads UI for files created by older builds.
-     */
+    
+
+
+
     suspend fun exportToPublic(id: String): Result<String> = withContext(Dispatchers.IO) {
         exportInternal(id, deleteInternal = true)
     }
@@ -820,10 +945,10 @@ class TorrentDownloadManager(private val appContext: Context) {
         return manager
     }
 
-    /**
-     * Downloads yield bandwidth while a stream is playing: the download session is rate-limited so
-     * piece fetching for playback stays ahead of the player, and released again when playback stops.
-     */
+    
+
+
+
     fun setStreamingThrottle(active: Boolean) {
         if (streamingThrottleActive == active) return
         streamingThrottleActive = active
@@ -892,16 +1017,17 @@ class TorrentDownloadManager(private val appContext: Context) {
         val INFO_HASH = Regex("(?i)btih:([a-z0-9]{40})")
         val RECOVERABLE_ID = Regex("(?i)[a-f0-9]{32,40}")
         val VIDEO_EXTENSIONS = setOf("mp4", "mkv", "webm", "m4v", "mov", "avi", "ts")
+        val SUBTITLE_EXTENSIONS = setOf("srt", "vtt", "ass", "ssa")
         const val COMPLETE_MARKER = ".streamline-complete"
         const val RESUME_FILE_NAME = ".fastresume"
         const val RESUME_SAVE_TIMEOUT_MILLIS = 3_000L
         const val RESUME_CHECKPOINT_INTERVAL_MILLIS = 30_000L
 
-        // Seeding is polite but not free: 1 MiB/s keeps swarms healthy without saturating a
-        // phone's uplink, which would starve the streaming session next door.
+        
+        
         const val DOWNLOAD_UPLOAD_LIMIT_BPS = 1024 * 1024
 
-        // While a stream plays, downloads back off so playback piece fetches win the race.
+        
         const val STREAMING_THROTTLE_BPS = 384 * 1024
     }
 }

@@ -109,6 +109,12 @@ class MagnetCatalogViewModelTest {
         override fun setHideAdultContent(hidden: Boolean) {
             _settings.value = _settings.value.copy(hideAdultContent = hidden)
         }
+
+        override fun setProxySettings(
+            proxy: com.streamline.app.core.settings.ProxySettings,
+        ) {
+            _settings.value = _settings.value.copy(proxy = proxy)
+        }
     }
 
     private fun torrent(id: String, title: String) = MagnetTitle(

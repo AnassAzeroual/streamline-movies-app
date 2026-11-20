@@ -145,6 +145,52 @@ class DefaultMagnetCatalogRepositoryTest {
     }
 
     @Test
+    fun `av1 releases are filtered from results`() = runBlocking {
+        val provider = FakeProvider(
+            MagnetPage(
+                items = listOf(
+                    title("av1", MagnetSource.YTS, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 100, titleText = "Movie 1080p AV1"),
+                    title("h264", MagnetSource.YTS, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", 10, titleText = "Movie 1080p x264"),
+                ),
+                page = 1,
+                hasMore = false,
+            ),
+        )
+        val repository = DefaultMagnetCatalogRepository(
+            providers = mapOf(MagnetSource.YTS to provider),
+        )
+
+        val page = repository.browse(MagnetSource.YTS, "", 1)
+
+        assertEquals(listOf("h264"), page.items.map { it.id })
+    }
+
+    @Test
+    fun `identical provider pages are served from cache`() = runBlocking {
+        var calls = 0
+        val provider = object : MagnetSourceProvider {
+            override suspend fun browse(query: String, page: Int): MagnetPage {
+                calls++
+                return MagnetPage(
+                    items = listOf(
+                        title("yts:1", MagnetSource.YTS, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 5),
+                    ),
+                    page = page,
+                    hasMore = false,
+                )
+            }
+        }
+        val repository = DefaultMagnetCatalogRepository(
+            providers = mapOf(MagnetSource.YTS to provider),
+        )
+
+        repository.browse(MagnetSource.YTS, "dune", 1)
+        repository.browse(MagnetSource.YTS, "dune", 1)
+
+        assertEquals(1, calls)
+    }
+
+    @Test
     fun `all sources keeps working when one provider fails`() = runBlocking {
         val working = FakeProvider(
             MagnetPage(

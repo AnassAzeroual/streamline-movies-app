@@ -2,7 +2,7 @@ package com.streamline.app.domain.model
 
 import java.util.Locale
 
-/** Best-effort genre tags from structured genres or release-name keywords. */
+
 enum class MovieGenre(
     val label: String,
     val aliases: List<String>,
@@ -22,6 +22,27 @@ enum class MovieGenre(
     MYSTERY("Mystery", listOf("mystery")),
     ADVENTURE("Adventure", listOf("adventure")),
     CRIME("Crime", listOf("crime")),
+    WESTERN("Western", listOf("western")),
+    WAR("War", listOf("war", "warfare")),
+    MUSIC("Music", listOf("music", "musical")),
+    HISTORY("History", listOf("history", "historical")),
+    BIOGRAPHY("Biography", listOf("biography", "biopic")),
+    SPORT("Sport", listOf("sport", "sports")),
+    SHORT("Short", listOf("short film", "short")),
+    FILM_NOIR("Film-Noir", listOf("film noir", "noir")),
+    TV_MOVIE("TV Movie", listOf("tv movie", "tv film")),
+    TV_SERIES("TV Series", listOf("tv series", "tv show", "complete series", "season")),
+    SUPERHERO("Superhero", listOf("superhero", "super hero")),
+    MARTIAL_ARTS("Martial Arts", listOf("martial arts", "kung fu", "karate")),
+    DISASTER("Disaster", listOf("disaster")),
+    HOLIDAY("Holiday", listOf("holiday", "christmas", "xmas")),
+    CULT("Cult", listOf("cult")),
+    INDIE("Indie", listOf("indie")),
+    SILENT("Silent", listOf("silent film", "silent")),
+    REALITY("Reality", listOf("reality")),
+    TALK("Talk Show", listOf("talk show", "talkshow")),
+    NEWS("News", listOf("news")),
+    GAME_SHOW("Game Show", listOf("game show", "gameshow")),
     ;
 
     fun matches(item: MagnetTitle): Boolean {

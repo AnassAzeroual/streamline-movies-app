@@ -1,6 +1,6 @@
 package com.streamline.app.data.magnet
 
-/** Shared HTML cleanup for the lightweight torrent-index scrapers. */
+
 object HtmlText {
     private val TAG = Regex("""(?s)<[^>]+>""")
     private val WHITESPACE = Regex("""\s+""")

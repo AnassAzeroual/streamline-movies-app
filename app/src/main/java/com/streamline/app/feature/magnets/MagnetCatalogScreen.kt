@@ -9,9 +9,15 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,10 +26,14 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -43,6 +53,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -54,22 +65,81 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.streamline.app.core.designsystem.Artwork
 import com.streamline.app.core.designsystem.CinematicBackground
 import com.streamline.app.core.designsystem.EmptyOrErrorState
 import com.streamline.app.core.designsystem.StreamlineColors
 import com.streamline.app.core.designsystem.isTelevision
 import com.streamline.app.core.designsystem.tvEdgePadding
 import com.streamline.app.core.di.AppContainer
+import com.streamline.app.core.download.DownloadFileOption
+import com.streamline.app.core.logging.AppLog
+import com.streamline.app.core.tv.TvRemotePlayback
+import com.streamline.app.core.playback.PlaybackHistoryEntry
 import com.streamline.app.domain.model.MagnetSource
 import com.streamline.app.domain.model.MagnetTitle
+import com.streamline.app.domain.model.PlaybackAlternative
 import com.streamline.app.domain.model.MovieGenre
 import com.streamline.app.domain.model.PlaybackRequest
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+
+private fun normalizedCatalogTitle(title: String): String = title
+    .lowercase()
+    .replace(Regex("\\b(19|20)\\d{2}\\b"), " ")
+    .replace(
+        Regex(
+            "\\b(2160p|1080p|720p|480p|4k|uhd|bluray|blu-ray|webrip|web-dl|webdl|" +
+                "x264|x265|hevc|avc|aac|dts|hdr|remux)\\b",
+        ),
+        " ",
+    )
+    .replace(Regex("[^a-z0-9]+"), " ")
+    .trim()
+    .replace(Regex("\\s+"), " ")
+
+private fun playbackWithCatalogAlternatives(
+    item: MagnetTitle,
+    release: com.streamline.app.domain.model.MagnetRelease?,
+    catalog: List<MagnetTitle>,
+): PlaybackRequest {
+    val base = item.playbackRequest(release)
+    if (catalog.size <= 1) return base
+    val key = normalizedCatalogTitle(item.title)
+    if (key.isBlank()) return base
+    val extras = catalog.asSequence()
+        .filter { it.id != item.id && normalizedCatalogTitle(it.title) == key }
+        .flatMap { other ->
+            other.playableReleases().asSequence().map { alternative ->
+                PlaybackAlternative(
+                    magnetUrl = alternative.magnetUrl,
+                    torrentUrl = alternative.torrentUrl,
+                    quality = alternative.quality,
+                    sourceLabel = other.source.label,
+                    seeds = alternative.seeds,
+                    sizeLabel = alternative.sizeLabel,
+                )
+            }
+        }
+        .filter { alternative ->
+            alternative.magnetUrl != base.magnetUrl &&
+                base.alternatives.none { it.magnetUrl == alternative.magnetUrl }
+        }
+        .distinctBy { it.magnetUrl }
+        .take(8)
+        .toList()
+    return base.copy(alternatives = (base.alternatives + extras).distinctBy { it.magnetUrl })
+}
 
 private fun Context.openYouTubeTrailer(item: MagnetTitle) {
     val query = listOfNotNull(
@@ -90,8 +160,9 @@ private fun Context.openYouTubeTrailer(item: MagnetTitle) {
 fun MagnetCatalogRoute(
     container: AppContainer,
     onOpenSettings: () -> Unit,
+    onOpenFavorites: () -> Unit,
     onOpenPlayer: (PlaybackRequest) -> Unit,
-    onDownload: (PlaybackRequest) -> Unit,
+    onDownload: (PlaybackRequest, List<Int>) -> Unit,
     onOpenDownloads: () -> Unit,
 ) {
     val viewModel: MagnetCatalogViewModel = viewModel(
@@ -101,31 +172,169 @@ fun MagnetCatalogRoute(
         ),
     )
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val history by container.playbackHistoryStore.items.collectAsStateWithLifecycle()
+    val favorites by container.favoriteStore.items.collectAsStateWithLifecycle()
+    val favoriteIds = remember(favorites) { favorites.mapTo(HashSet()) { it.item.id } }
     val context = LocalContext.current
+    val pickerScope = rememberCoroutineScope()
+    var downloadRequest by remember { mutableStateOf<PlaybackRequest?>(null) }
+    var downloadFiles by remember { mutableStateOf<List<DownloadFileOption>>(emptyList()) }
+    var downloadSelection by remember { mutableStateOf<Set<Int>>(emptySet()) }
+    var downloadLoading by remember { mutableStateOf(false) }
+    var downloadError by remember { mutableStateOf<String?>(null) }
 
     MagnetCatalogScreen(
         state = state,
-        onSourceSelected = viewModel::onSourceSelected,
-        onQueryChange = viewModel::onQueryChange,
-        onClearQuery = viewModel::clearQuery,
-        onRefresh = viewModel::refresh,
-        onRetry = viewModel::retry,
-        onLoadMore = viewModel::loadNextPage,
-        onLanguageFilterChange = viewModel::onLanguageFilterChange,
-        onGenreFilterChange = viewModel::onGenreFilterChange,
-        onClearFilters = viewModel::clearFilters,
-        onTrailer = { item -> context.openYouTubeTrailer(item) },
-        onOpenSettings = onOpenSettings,
-        onOpenPlayer = onOpenPlayer,
-        onDownload = onDownload,
-        onOpenDownloads = onOpenDownloads,
+        history = history,
+        favoriteIds = favoriteIds,
+        onToggleFavorite = { item ->
+            val added = container.favoriteStore.toggle(item)
+            AppLog.event(
+                "FAVORITES",
+                if (added) "add" else "remove",
+                fields = mapOf("id" to item.id, "title" to item.title),
+            )
+        },
+        onOpenHistory = { entry ->
+            AppLog.event("UI", "continue_watching_click", fields = mapOf("title" to entry.title))
+            onOpenPlayer(entry.request())
+        },
+        onSourceSelected = { source ->
+            AppLog.event("UI", "source_select", fields = mapOf("source" to source.label))
+            viewModel.onSourceSelected(source)
+        },
+        onQueryChange = { query ->
+            AppLog.event("UI", "query_change", fields = mapOf("query" to query))
+            viewModel.onQueryChange(query)
+        },
+        onClearQuery = {
+            AppLog.event("UI", "query_clear")
+            viewModel.clearQuery()
+        },
+        onRefresh = {
+            AppLog.event("UI", "refresh", fields = mapOf("source" to state.source.label))
+            viewModel.refresh()
+        },
+        onRetry = {
+            AppLog.event("UI", "retry_load", fields = mapOf("source" to state.source.label))
+            viewModel.retry()
+        },
+        onLoadMore = {
+            AppLog.event("UI", "load_more", fields = mapOf("page" to state.page))
+            viewModel.loadNextPage()
+        },
+        onLanguageFilterChange = { filter ->
+            AppLog.event("UI", "language_filter", fields = mapOf("filter" to filter.shortLabel))
+            viewModel.onLanguageFilterChange(filter)
+        },
+        onGenreFilterChange = { genre ->
+            AppLog.event("UI", "genre_filter", fields = mapOf("genre" to (genre?.label ?: "All")))
+            viewModel.onGenreFilterChange(genre)
+        },
+        onClearFilters = {
+            AppLog.event("UI", "clear_filters")
+            viewModel.clearFilters()
+        },
+        onTrailer = { item ->
+            AppLog.event("UI", "trailer_click", fields = mapOf("title" to item.title))
+            context.openYouTubeTrailer(item)
+        },
+        onOpenSettings = {
+            AppLog.event("UI", "settings_click")
+            onOpenSettings()
+        },
+        onOpenFavorites = {
+            AppLog.event("UI", "favorites_click")
+            onOpenFavorites()
+        },
+        onOpenPlayer = { request ->
+            AppLog.event(
+                "PLAYBACK",
+                "open_request",
+                fields = mapOf(
+                    "title" to request.title,
+                    "quality" to request.quality,
+                    "source" to request.sourceLabel,
+                    "alternatives" to request.alternatives.size,
+                ),
+            )
+            onOpenPlayer(request)
+        },
+        onDownload = { request ->
+            AppLog.event(
+                "DOWNLOAD",
+                "enqueue_click",
+                fields = mapOf(
+                    "title" to request.title,
+                    "quality" to request.quality,
+                    "source" to request.sourceLabel,
+                ),
+            )
+            if (!downloadLoading) {
+                downloadRequest = request
+                downloadFiles = emptyList()
+                downloadSelection = emptySet()
+                downloadError = null
+                downloadLoading = true
+                pickerScope.launch {
+                    container.downloadManager.inspectFiles(request)
+                        .onSuccess { files ->
+                            if (downloadRequest?.id != request.id) return@onSuccess
+                            downloadFiles = files
+                            downloadSelection = defaultDownloadSelection(files)
+                            downloadLoading = false
+                        }
+                        .onFailure { error ->
+                            downloadError = error.message ?: "Could not read the torrent file list."
+                            downloadLoading = false
+                        }
+                }
+            }
+        },
+        onOpenDownloads = {
+            AppLog.event("UI", "downloads_click")
+            onOpenDownloads()
+        },
     )
+
+    downloadRequest?.let { request ->
+        DownloadFilePickerDialog(
+            files = downloadFiles,
+            selected = downloadSelection,
+            loading = downloadLoading,
+            error = downloadError,
+            onToggle = { index ->
+                downloadSelection = if (index in downloadSelection) {
+                    downloadSelection - index
+                } else {
+                    downloadSelection + index
+                }
+            },
+            onDismiss = {
+                downloadRequest = null
+                downloadLoading = false
+                downloadError = null
+            },
+            onConfirm = {
+                val selected = downloadSelection.toList()
+                if (selected.isNotEmpty()) {
+                    downloadRequest = null
+                    downloadLoading = false
+                    onDownload(request, selected)
+                }
+            },
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MagnetCatalogScreen(
     state: MagnetCatalogUiState,
+    history: List<PlaybackHistoryEntry>,
+    favoriteIds: Set<String>,
+    onToggleFavorite: (MagnetTitle) -> Unit,
+    onOpenHistory: (PlaybackHistoryEntry) -> Unit,
     onSourceSelected: (MagnetSource) -> Unit,
     onQueryChange: (String) -> Unit,
     onClearQuery: () -> Unit,
@@ -137,6 +346,7 @@ fun MagnetCatalogScreen(
     onClearFilters: () -> Unit,
     onTrailer: (MagnetTitle) -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenFavorites: () -> Unit,
     onOpenPlayer: (PlaybackRequest) -> Unit,
     onDownload: (PlaybackRequest) -> Unit,
     onOpenDownloads: () -> Unit,
@@ -144,6 +354,17 @@ fun MagnetCatalogScreen(
     val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val isTv = isTelevision()
+    val sourceFocus = remember { FocusRequester() }
+    val topBarFocus = remember { FocusRequester() }
+    var initialFocusDone by remember { mutableStateOf(false) }
+    LaunchedEffect(isTv) {
+        if (!isTv) return@LaunchedEffect
+        repeat(6) {
+            delay(400)
+            if (runCatching { sourceFocus.requestFocus() }.isSuccess) return@LaunchedEffect
+        }
+        runCatching { topBarFocus.requestFocus() }
+    }
     val edgePadding = tvEdgePadding(isTv)
     val headerOffset = if (isTv) 96.dp else 66.dp
     val gridState = rememberLazyGridState()
@@ -200,6 +421,15 @@ fun MagnetCatalogScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
                 ) {
+                    if (history.isNotEmpty()) {
+                        item(
+                            key = "continue-watching",
+                            span = { GridItemSpan(maxLineSpan) },
+                        ) {
+                            ContinueWatchingRail(history, onOpenHistory)
+                        }
+                    }
+
                     item(
                         key = "archive-header",
                         span = { GridItemSpan(maxLineSpan) },
@@ -212,6 +442,7 @@ fun MagnetCatalogScreen(
                             onQueryChange = onQueryChange,
                             onClearQuery = onClearQuery,
                             onRefresh = onRefresh,
+                            initialFocusRequester = sourceFocus,
                         )
                     }
 
@@ -242,7 +473,7 @@ fun MagnetCatalogScreen(
                                 !state.isSearching &&
                                 state.query.isBlank()
                             val sourceName = if (state.source == MagnetSource.ALL) {
-                                "all eight sources"
+                                "all sources"
                             } else {
                                 state.source.label
                             }
@@ -323,16 +554,17 @@ fun MagnetCatalogScreen(
                                 )
                             }
                         }
-                        items(
+                        itemsIndexed(
                             items = state.items,
-                            key = { it.id },
-                        ) { item ->
+                            key = { _, item -> item.id },
+                        ) { index, item ->
                             MagnetCard(
                                 item = item,
+                                modifier = Modifier,
                                 onPlay = {
                                     val releases = item.playableReleases()
                                     if (releases.size == 1) {
-                                        onOpenPlayer(item.playbackRequest(releases.first()))
+                                        onOpenPlayer(playbackWithCatalogAlternatives(item, releases.first(), state.items))
                                     } else {
                                         qualityAction = QualityAction.PLAY
                                         qualityTarget = item
@@ -343,6 +575,8 @@ fun MagnetCatalogScreen(
                                     qualityAction = QualityAction.DOWNLOAD
                                     qualityTarget = item
                                 },
+                                isFavorite = item.id in favoriteIds,
+                                onToggleFavorite = { onToggleFavorite(item) },
                                 languageFilter = state.languageFilter,
                             )
                         }
@@ -361,9 +595,11 @@ fun MagnetCatalogScreen(
         }
 
         MagnetTopBar(
+            onOpenFavorites = onOpenFavorites,
             onOpenDownloads = onOpenDownloads,
             onOpenSettings = onOpenSettings,
             modifier = Modifier.align(Alignment.TopCenter),
+            initialFocusRequester = topBarFocus,
         )
 
         AnimatedVisibility(
@@ -416,7 +652,7 @@ fun MagnetCatalogScreen(
             onSelect = { release ->
                 val request = target.playbackRequest(release)
                 if (qualityAction == QualityAction.PLAY) {
-                    onOpenPlayer(request)
+                    onOpenPlayer(playbackWithCatalogAlternatives(target, release, state.items))
                 } else {
                     onDownload(request)
                 }
@@ -424,6 +660,72 @@ fun MagnetCatalogScreen(
             },
             onDismiss = { qualityTarget = null },
         )
+    }
+}
+
+@Composable
+private fun ContinueWatchingRail(
+    history: List<PlaybackHistoryEntry>,
+    onOpen: (PlaybackHistoryEntry) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "CONTINUE WATCHING",
+            color = StreamlineColors.Gold,
+            style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.6.sp),
+            modifier = Modifier.padding(horizontal = 2.dp, vertical = 8.dp),
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            history.take(10).forEach { entry ->
+                Surface(
+                    onClick = { onOpen(entry) },
+                    modifier = Modifier.width(150.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    color = StreamlineColors.Surface,
+                    border = BorderStroke(1.dp, StreamlineColors.Hairline),
+                ) {
+                    Column {
+                        Artwork(
+                            url = entry.posterUrl,
+                            contentDescription = entry.title,
+                            fallbackSeed = entry.title,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(84.dp),
+                            shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp),
+                        )
+                        Column(modifier = Modifier.padding(8.dp)) {
+                            Text(
+                                text = entry.title,
+                                color = StreamlineColors.TextPrimary,
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 2,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                            )
+                            Spacer(Modifier.height(5.dp))
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(3.dp)
+                                    .background(StreamlineColors.Gold.copy(alpha = 0.25f)),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(entry.progress)
+                                        .height(3.dp)
+                                        .background(StreamlineColors.Gold),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -11,7 +11,7 @@ interface MagnetCatalogRepository {
     ): MagnetPage
 }
 
-/** A source-level failure whose [message] is safe to show directly in the archive UI. */
+
 class MagnetCatalogException(
     override val message: String,
     cause: Throwable? = null,

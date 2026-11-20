@@ -2,10 +2,10 @@ package com.streamline.app.core.designsystem
 
 import androidx.compose.ui.graphics.Color
 
-/**
- * Streamline's palette deliberately avoids pure white: warm ivory type on near-black surfaces keeps
- * long browsing sessions comfortable and lets poster art carry the colour.
- */
+
+
+
+
 object StreamlineColors {
     val Ink = Color(0xFF060708)
     val InkSoft = Color(0xFF0A0C10)

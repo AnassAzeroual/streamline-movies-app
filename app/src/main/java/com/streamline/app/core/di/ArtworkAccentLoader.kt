@@ -10,7 +10,7 @@ import okhttp3.Request
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 
-/** Downloads a small poster crop and derives a readable accent colour from its palette. */
+
 class ArtworkAccentLoader(private val client: OkHttpClient) {
     private val cache = ConcurrentHashMap<String, Int>()
 

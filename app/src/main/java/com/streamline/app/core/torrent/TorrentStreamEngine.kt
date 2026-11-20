@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.SystemClock
 import android.system.Os
 import android.util.Log
+import com.streamline.app.core.logging.AppLog
 import com.streamline.app.core.util.readBytesBounded
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -52,7 +53,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 import kotlin.math.min
 
-/** A single file inside a streaming torrent, addressable by piece range. */
+
 class TorrentFileStream(
     val handle: TorrentHandle,
     val file: File,
@@ -66,22 +67,57 @@ class TorrentFileStream(
     val pieceWaiter: TorrentPieceWaiter,
     private val pieceSizes: IntArray,
 ) {
-    /** Cached piece size (index 0 == [firstPiece]); avoids a JNI round-trip on every read. */
+    
+    @Volatile var playheadPiece: Int = -1
+
+    
+    @Volatile var seekGeneration: Long = 0L
+
+    
+    @Volatile var protectedPieces: Set<Int> = emptySet()
+
+    
     fun pieceSize(piece: Int): Int {
         val index = piece - firstPiece
         return if (index in pieceSizes.indices) pieceSizes[index] else pieceLength
     }
 
+    fun timeline(durationMs: Long): PieceTimeline = PieceTimeline(
+        fileSize = fileSize,
+        durationMs = durationMs,
+        pieceLength = pieceLength,
+        fileTorrentOffset = fileTorrentOffset,
+        firstPiece = firstPiece,
+        lastPiece = lastPiece,
+    )
+
     val extension: String
         get() = fileName.substringAfterLast('.', "").lowercase()
 }
 
+data class TorrentVideoFile(
+    val index: Int,
+    val name: String,
+    val size: Long,
+)
+
 data class TorrentPlayback(
     val video: TorrentFileStream,
+    val videoFiles: List<TorrentVideoFile>,
+    val artwork: TorrentFileStream?,
     val subtitles: List<TorrentFileStream>,
     val cacheDir: File,
     val pieceWaiter: TorrentPieceWaiter,
 ) {
+    private val seekCounter = java.util.concurrent.atomic.AtomicLong(0L)
+
+    
+    fun beginSeek() {
+        val generation = seekCounter.incrementAndGet()
+        video.seekGeneration = generation
+        pieceWaiter.wake()
+    }
+
     val handle: TorrentHandle get() = video.handle
     val file: File get() = video.file
     val fileName: String get() = video.fileName
@@ -103,6 +139,16 @@ data class TorrentPlayback(
         }
 }
 
+enum class TorrentFailureKind {
+    METADATA,
+    NO_PEERS,
+    CONTAINER,
+    FILE,
+    SESSION,
+    TIMEOUT,
+    UNKNOWN,
+}
+
 sealed interface TorrentState {
     data object Idle : TorrentState
     data class FetchingMetadata(val magnetName: String?) : TorrentState
@@ -120,16 +166,19 @@ sealed interface TorrentState {
     ) : TorrentState
 
     data class Ready(val playback: TorrentPlayback) : TorrentState
-    data class Failed(val message: String) : TorrentState
+    data class Failed(
+        val message: String,
+        val kind: TorrentFailureKind = TorrentFailureKind.UNKNOWN,
+    ) : TorrentState
 }
 
-/**
- * A single-torrent streaming engine.
- *
- * Only the largest video file is selected. The first and last pieces are prioritised (the latter so
- * a trailing MP4 `moov` atom is available), while [TorrentDataSource] blocks for the bytes Media3
- * asks for instead of waiting for the whole download to finish.
- */
+
+
+
+
+
+
+
 class TorrentStreamEngine(context: Context) {
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -142,7 +191,7 @@ class TorrentStreamEngine(context: Context) {
     private val _state = MutableStateFlow<TorrentState>(TorrentState.Idle)
     val state: StateFlow<TorrentState> = _state.asStateFlow()
 
-    /** Notified whenever streaming starts/stops so the download session can yield bandwidth. */
+    
     var onStreamingStateChanged: ((Boolean) -> Unit)? = null
 
     private val streamsRoot = File(appContext.filesDir, "streams")
@@ -155,6 +204,7 @@ class TorrentStreamEngine(context: Context) {
     private var sessionManager: SessionManager? = null
     private var activeJob: Job? = null
     private var teardownJob: Job? = null
+    private var telemetryJob: Job? = null
     private var activeHandle: TorrentHandle? = null
     private var activePlayback: TorrentPlayback? = null
     private var backgroundCleanupJob: Job? = null
@@ -163,13 +213,138 @@ class TorrentStreamEngine(context: Context) {
 
     private val pendingResumeSaves = ConcurrentHashMap<String, ResumeSave>()
 
-    // Phase measurement (logcat timeline for bottleneck analysis).
+    
     @Volatile private var phaseStartedAt = 0L
     @Volatile private var firstPeerLogged = false
     @Volatile private var firstPieceLogged = false
     @Volatile private var streamingActive = false
 
-    fun play(sourceUri: String, directTorrentUrl: String? = null) {
+    
+
+
+
+    fun updatePlayhead(positionMs: Long, bufferedPositionMs: Long, durationMs: Long) {
+        val playback = activePlayback ?: return
+        if (durationMs <= 0L || positionMs < 0L) return
+        val first = playback.firstPiece
+        val last = playback.lastPiece
+        if (playback.pieceLength <= 0 || last < first) return
+        val clamped = positionMs.coerceAtMost(durationMs)
+        val timeline = playback.video.timeline(durationMs)
+        val absolute = timeline.pieceForTime(clamped)
+        val buffered = (bufferedPositionMs - positionMs).coerceAtLeast(0L)
+        val bufferedPiece = timeline.pieceForTime(
+            (clamped + buffered).coerceAtMost(durationMs),
+        )
+        playback.video.playheadPiece = absolute
+        applyPlayheadWindow(playback, absolute, bufferedPiece)
+    }
+
+    private fun applyPlayheadWindow(
+        playback: TorrentPlayback,
+        playhead: Int,
+        bufferedPiece: Int,
+    ) {
+        val first = playback.firstPiece
+        val last = playback.lastPiece
+        if (last < first) return
+        val readAhead = (PLAYHEAD_READ_AHEAD_BYTES / playback.pieceLength.coerceAtLeast(1))
+            .toInt()
+            .coerceIn(MIN_PLAYHEAD_READ_AHEAD_PIECES, MAX_PLAYHEAD_READ_AHEAD_PIECES)
+        val windowStart = playhead.coerceIn(first, last)
+        
+        val prefetchStart = maxOf(windowStart, bufferedPiece)
+        val windowEnd = minOf(last, prefetchStart + readAhead)
+        runCatching {
+            playback.handle.resume()
+            for (piece in first..last) {
+                if (
+                    piece !in windowStart..windowEnd &&
+                    piece !in playback.video.protectedPieces &&
+                    !playback.handle.havePiece(piece)
+                ) {
+                    playback.handle.piecePriority(piece, Priority.IGNORE)
+                }
+            }
+            playback.handle.setSequentialRange(windowStart, windowEnd)
+            for (piece in windowStart..windowEnd) {
+                if (!playback.handle.havePiece(piece)) {
+                    playback.handle.piecePriority(piece, Priority.TOP_PRIORITY)
+                    playback.handle.setPieceDeadline(
+                        piece,
+                        if (piece <= windowStart + 3) 800 else 1_500,
+                    )
+                }
+            }
+        }
+    }
+
+    
+
+
+
+    suspend fun loadArtwork(playback: TorrentPlayback): File? = withContext(Dispatchers.IO) {
+        val artwork = playback.artwork ?: return@withContext null
+        val extension = artwork.fileName.substringAfterLast('.', "jpg").lowercase()
+        val target = File(playback.cacheDir, "cover." + extension)
+        if (target.isFile && target.length() >= artwork.fileSize) return@withContext target
+        val deadline = SystemClock.elapsedRealtime() + ARTWORK_WAIT_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val piecesReady = (artwork.firstPiece..artwork.lastPiece).all { piece ->
+                runCatching { artwork.handle.havePiece(piece) }.getOrDefault(false)
+            }
+            if (piecesReady) break
+            runCatching {
+                artwork.handle.resume()
+                for (piece in artwork.firstPiece..artwork.lastPiece) {
+                    artwork.handle.piecePriority(piece, Priority.TOP_PRIORITY)
+                }
+            }
+            delay(250L)
+        }
+        val piecesReady = (artwork.firstPiece..artwork.lastPiece).all { piece ->
+            runCatching { artwork.handle.havePiece(piece) }.getOrDefault(false)
+        }
+        if (!piecesReady) {
+            AppLog.warn(
+                "ARTWORK",
+                "torrent_cover_timeout",
+                fields = mapOf(
+                    "file" to artwork.fileName,
+                    "pieces" to (artwork.lastPiece - artwork.firstPiece + 1),
+                ),
+            )
+            return@withContext null
+        }
+        runCatching {
+            val temp = File(playback.cacheDir, "cover.tmp")
+            artwork.file.copyTo(temp, overwrite = true)
+            if (temp.length() <= 0L) return@runCatching null
+            if (target.exists()) target.delete()
+            if (!temp.renameTo(target)) return@runCatching null
+            AppLog.event(
+                "ARTWORK",
+                "torrent_cover_loaded",
+                fields = mapOf("file" to artwork.fileName, "bytes" to target.length()),
+            )
+            target
+        }.getOrNull()
+    }
+
+    fun play(
+        sourceUri: String,
+        directTorrentUrl: String? = null,
+        preferredFileIndex: Int? = null,
+    ) {
+        AppLog.event(
+            "STREAM",
+            "play_start",
+            fields = mapOf(
+                "source" to sourceNameFrom(sourceUri),
+                "directTorrent" to (directTorrentUrl != null),
+                "preferredFileIndex" to preferredFileIndex,
+            ),
+        )
         activeJob?.cancel()
         val myGeneration = generation.incrementAndGet()
         activeJob = scope.launch {
@@ -177,12 +352,12 @@ class TorrentStreamEngine(context: Context) {
             phaseStartedAt = playbackStartedAt
             firstPeerLogged = false
             firstPieceLogged = false
+            _state.value = TorrentState.FetchingMetadata(sourceNameFrom(sourceUri))
             cacheMaintenance.join()
-            // A stop() teardown saves fastresume before removing the torrent. Adding the same
-            // info-hash while that is still in flight would hand back a handle about to be removed.
+            
+            
             teardownJob?.join()
             clearHandle()
-            _state.value = TorrentState.FetchingMetadata(sourceNameFrom(sourceUri))
             var cacheDir: File? = null
             try {
                 val manager = ensureSession()
@@ -198,34 +373,42 @@ class TorrentStreamEngine(context: Context) {
                 ensureCurrent(myGeneration)
 
                 val info = TorrentInfo.bdecode(metadata)
-                if (!info.isValid) throw TorrentFailure("The torrent metadata is invalid.")
-                // One directory per info-hash: pieces downloaded for a previous viewing (or a
-                // previous app run) are still on disk and are re-used instead of re-downloaded.
+                if (!info.isValid) {
+                    throw TorrentFailure("The torrent metadata is invalid.", TorrentFailureKind.METADATA)
+                }
+                
+                
                 val saveDir = File(streamsRoot, CACHE_DIR_PREFIX + info.infoHash().toHex())
                     .apply { mkdirs() }
                 saveDir.setLastModified(System.currentTimeMillis())
                 cacheDir = saveDir
                 evictCache(keep = saveDir)
-                val fileIndex = chooseVideoFile(info)
+                val videos = videoFiles(info)
+                val fileIndex = chooseVideoFile(videos, preferredFileIndex)
                 if (fileIndex < 0) {
                     throw TorrentFailure(
                         "This torrent contains no playable video file. " +
                             "Found: " + summarizeContents(info) + ". " +
                             "Supported formats: " + VIDEO_EXTENSIONS.joinToString(", ") + ".",
+                        TorrentFailureKind.FILE,
                     )
                 }
 
                 val fileStorage = info.files()
                 val selectedSize = fileStorage.fileSize(fileIndex)
-                if (selectedSize <= 0L) throw TorrentFailure("The selected video file is empty.")
+                if (selectedSize <= 0L) {
+                    throw TorrentFailure("The selected video file is empty.", TorrentFailureKind.FILE)
+                }
                 val pieceLength = info.pieceLength()
                 if (pieceLength <= 0) throw TorrentFailure("The torrent has an invalid piece size.")
 
                 val subtitleIndexes = chooseSubtitleFiles(info, fileIndex)
+                val artworkIndex = chooseArtworkIndex(info, fileIndex)
 
                 val priorities = Priority.array(Priority.IGNORE, info.numFiles())
                 priorities[fileIndex] = Priority.DEFAULT
                 subtitleIndexes.forEach { index -> priorities[index] = Priority.DEFAULT }
+                if (artworkIndex != null) priorities[artworkIndex] = Priority.DEFAULT
                 awaitTorrentRemoved(manager, info.infoHash(), myGeneration)
                 val resumeFile = File(saveDir, RESUME_FILE_NAME)
                 try {
@@ -238,8 +421,8 @@ class TorrentStreamEngine(context: Context) {
                         TorrentFlags.SEQUENTIAL_DOWNLOAD,
                     )
                 } catch (unreadableResume: IllegalArgumentException) {
-                    // Fastresume written by an older build or interrupted mid-write: drop it and
-                    // let libtorrent re-check the cached pieces instead of failing the playback.
+                    
+                    
                     Log.w("StreamlineTorrent", "Discarding unreadable resume data", unreadableResume)
                     resumeFile.delete()
                     manager.download(
@@ -267,7 +450,12 @@ class TorrentStreamEngine(context: Context) {
                 handle.prioritizeFiles(priorities)
                 val firstPiece = fileStorage.pieceIndexAtFile(fileIndex)
                 val lastPiece = fileStorage.lastPieceIndexAtFile(fileIndex)
-                handle.setSequentialRange(firstPiece, lastPiece)
+                
+                
+                handle.setSequentialRange(
+                    firstPiece,
+                    minOf(lastPiece, firstPiece + INITIAL_PRIORITY_PIECES),
+                )
                 handle.resume()
                 TrackerLists.addPeerDiscoveryTrackers(handle)
                 boostInitialWindow(handle, firstPiece, lastPiece)
@@ -281,28 +469,86 @@ class TorrentStreamEngine(context: Context) {
                     saveDir = saveDir,
                     fileIndex = fileIndex,
                     pieceWaiter = pieceWaiter,
-                ) ?: throw TorrentFailure("The torrent contains an unsafe file path.")
+                ) ?: throw TorrentFailure(
+                    "The torrent contains an unsafe file path.",
+                    TorrentFailureKind.FILE,
+                )
                 val subtitleStreams = subtitleIndexes.mapNotNull { index ->
                     buildStream(handle, info, saveDir, index, pieceWaiter)
                 }
+                val artworkStream = artworkIndex?.let { index ->
+                    buildStream(handle, info, saveDir, index, pieceWaiter)
+                }
+                videoStream.protectedPieces = artworkStream?.let { artwork ->
+                    (artwork.firstPiece..artwork.lastPiece).toSet()
+                }.orEmpty()
                 val playback = TorrentPlayback(
                     video = videoStream,
+                    videoFiles = videos,
+                    artwork = artworkStream,
                     subtitles = subtitleStreams,
                     cacheDir = saveDir,
                     pieceWaiter = pieceWaiter,
                 )
                 activePlayback = playback
 
+                
+                
+                
+                applyPlayheadWindow(playback, firstPiece, firstPiece)
+
+                
+                
+                awaitContainerMetadata(playback, myGeneration)
+                logPhase(playbackStartedAt, "Container preflight ready")
+                ensureCurrent(myGeneration)
+                
+                
+                applyPlayheadWindow(playback, firstPiece, firstPiece)
                 awaitInitialBuffer(playback, myGeneration)
                 logPhase(playbackStartedAt, "Initial buffer ready")
                 ensureCurrent(myGeneration)
-                awaitContainerMetadata(playback, myGeneration)
                 _state.value = TorrentState.Ready(playback)
+                AppLog.event(
+                    "STREAM",
+                    "ready",
+                    fields = mapOf(
+                        "file" to playback.fileName,
+                        "size" to playback.fileSize,
+                        "pieces" to (playback.lastPiece - playback.firstPiece + 1),
+                        "subtitles" to subtitleStreams.size,
+                    ),
+                )
                 Log.i(
                     "StreamlineTorrent",
                     "Torrent ready: ${videoStream.fileName} (${videoStream.fileSize} bytes) " +
                         "subtitles=${subtitleStreams.size}",
                 )
+                telemetryJob?.cancel()
+                telemetryJob = scope.launch {
+                    while (isActive) {
+                        val current = activePlayback ?: break
+                        val status = runCatching { current.handle.status() }.getOrNull()
+                        if (status != null) {
+                            AppLog.event(
+                                "STREAM",
+                                "telemetry",
+                                fields = mapOf(
+                                    "state" to _state.value.javaClass.simpleName,
+                                    "seeds" to status.numSeeds(),
+                                    "peers" to status.numPeers(),
+                                    "downloadRate" to status.downloadRate(),
+                                    "uploadRate" to status.uploadRate(),
+                                    "fileProgress" to runCatching {
+                                        current.handle.fileProgress()[current.fileIndex]
+                                    }.getOrDefault(0L),
+                                    "wanted" to status.progress(),
+                                ),
+                            )
+                        }
+                        delay(5_000L)
+                    }
+                }
             } catch (cancelled: CancellationException) {
                 activePlayback?.pieceWaiter?.cancel()
                 activeHandle?.let { handle -> runCatching { handle.pause() } }
@@ -315,8 +561,17 @@ class TorrentStreamEngine(context: Context) {
                 setStreamingActive(false)
                 persistCache(cacheDir)
                 Log.w("StreamlineTorrent", "Torrent failed: ${failure.message}")
+                AppLog.warn(
+                    "STREAM",
+                    "failed",
+                    message = failure.message.orEmpty(),
+                    fields = mapOf("kind" to failure.kind.name),
+                )
                 if (generation.get() == myGeneration) {
-                    _state.value = TorrentState.Failed(failure.message ?: "Torrent playback failed.")
+                    _state.value = TorrentState.Failed(
+                        failure.message ?: "Torrent playback failed.",
+                        failure.kind,
+                    )
                 }
             } catch (error: UnsatisfiedLinkError) {
                 activePlayback?.pieceWaiter?.cancel()
@@ -347,10 +602,10 @@ class TorrentStreamEngine(context: Context) {
         }
     }
 
-    /**
-     * Starts the native session early so DHT bootstrap and the peer cache are warm before the
-     * first play. The session is process-scoped and reused by every stream.
-     */
+    
+
+
+
     fun warmUp() {
         scope.launch { runCatching { ensureSession() } }
     }
@@ -369,10 +624,10 @@ class TorrentStreamEngine(context: Context) {
         runCatching { onStreamingStateChanged?.invoke(active) }
     }
 
-    /**
-     * Android can kill the process without a stop() call. Periodic checkpoints keep the
-     * verified-piece map on disk so the next open re-uses the cache instead of re-hashing it.
-     */
+    
+
+
+
     private fun startResumeCheckpoints() {
         resumeCheckpointJob?.cancel()
         resumeCheckpointJob = scope.launch {
@@ -455,6 +710,7 @@ class TorrentStreamEngine(context: Context) {
             metadataDir,
         ) ?: throw TorrentFailure(
             "Could not fetch torrent metadata. The magnet may have no active peers.",
+            TorrentFailureKind.METADATA,
         )
         if (!isValidMetadata(fetched, infoHash)) {
             throw TorrentFailure(
@@ -586,6 +842,8 @@ class TorrentStreamEngine(context: Context) {
     }
 
     fun stop() {
+        telemetryJob?.cancel()
+        telemetryJob = null
         generation.incrementAndGet()
         activeJob?.cancel()
         activeJob = null
@@ -631,13 +889,22 @@ class TorrentStreamEngine(context: Context) {
     }
 
     suspend fun clearDownloadedData(): Long = withContext(Dispatchers.IO) {
+        val directory = streamsRoot
+        val metadataDir = File(appContext.filesDir, "torrent-metadata")
+        
+        
+        val bytes = diskUsage(directory) +
+            diskUsage(metadataDir) +
+            diskUsage(appContext.cacheDir)
         stop()
         teardownJob?.join()
-        val directory = streamsRoot
-        val bytes = diskUsage(directory)
         directory.deleteRecursively()
-        File(appContext.filesDir, "torrent-metadata").deleteRecursively()
-        File(appContext.cacheDir, "torrent-metadata").deleteRecursively()
+        metadataDir.deleteRecursively()
+        
+        
+        appContext.cacheDir.listFiles()?.forEach { child ->
+            runCatching { child.deleteRecursively() }
+        }
         bytes
     }
 
@@ -655,17 +922,17 @@ class TorrentStreamEngine(context: Context) {
         }
     }
 
-    /** Failure paths keep the pieces: they are the expensive part of the next open. */
+    
     private fun persistCache(directory: File?) {
         val handle = activeHandle ?: return
         if (directory == null) return
         scope.launch { saveResumeData(handle, directory) }
     }
 
-    /**
-     * libtorrent answers [TorrentHandle.saveResumeData] asynchronously, and the torrent must stay
-     * in the session until the alert lands or the verified-piece map is lost.
-     */
+    
+
+
+
     private suspend fun saveResumeData(handle: TorrentHandle, directory: File?, flush: Boolean = true) {
         if (directory == null) return
         val infoHash = runCatching { handle.infoHash().toHex() }.getOrNull() ?: return
@@ -695,10 +962,10 @@ class TorrentStreamEngine(context: Context) {
         request.done.complete(written)
     }
 
-    /**
-     * Drops the least recently used caches once the total passes the cap. The torrent being opened
-     * is never a candidate.
-     */
+    
+
+
+
     private fun evictCache(keep: File?) {
         val directories = streamsRoot.listFiles()
             ?.filter { it.isDirectory && it.name.startsWith(CACHE_DIR_PREFIX) }
@@ -723,8 +990,8 @@ class TorrentStreamEngine(context: Context) {
         return (free / CACHE_FREE_SPACE_DIVISOR).coerceIn(MIN_CACHE_LIMIT_BYTES, MAX_CACHE_LIMIT_BYTES)
     }
 
-    // Torrent files are sparse: File.length() reports the full media size even when only a few
-    // pieces were downloaded, so accounting has to use the blocks actually allocated on disk.
+    
+    
     private fun diskUsage(directory: File): Long {
         if (!directory.exists()) return 0L
         return directory.walkTopDown()
@@ -747,7 +1014,7 @@ class TorrentStreamEngine(context: Context) {
         settings.activeLsdLimit(50)
         settings.maxPeerlistSize(10_000)
         settings.setDhtBootstrapNodes(TrackerLists.DHT_BOOTSTRAP_NODES)
-        // Cap upload: on asymmetric mobile/broadband links uncapped upload starves download ACKs.
+        
         settings.uploadRateLimit(STREAM_UPLOAD_LIMIT_BPS)
         settings.setBoolean(settings_pack.bool_types.enable_upnp.swigValue(), true)
         settings.setBoolean(settings_pack.bool_types.enable_natpmp.swigValue(), true)
@@ -853,22 +1120,31 @@ class TorrentStreamEngine(context: Context) {
         throw TorrentFailure("The torrent could not be added to the session.")
     }
 
-    private fun chooseVideoFile(info: TorrentInfo): Int {
+    private fun videoFiles(info: TorrentInfo): List<TorrentVideoFile> {
         val files = info.files()
-        var selected = -1
-        var largest = 0L
-        for (index in 0 until files.numFiles()) {
-            if (files.padFileAt(index)) continue
+        return (0 until files.numFiles()).mapNotNull { index ->
+            if (files.padFileAt(index)) return@mapNotNull null
             val path = files.filePath(index)
             val extension = path.substringAfterLast('.', "").lowercase()
-            if (extension !in VIDEO_EXTENSIONS) continue
+            if (extension !in VIDEO_EXTENSIONS) return@mapNotNull null
             val size = files.fileSize(index)
-            if (size > largest) {
-                largest = size
-                selected = index
-            }
+            if (size <= 0L) return@mapNotNull null
+            TorrentVideoFile(
+                index = index,
+                name = path.substringAfterLast('/').substringAfterLast(java.io.File.separatorChar),
+                size = size,
+            )
         }
-        return selected
+    }
+
+    private fun chooseVideoFile(
+        videos: List<TorrentVideoFile>,
+        preferredFileIndex: Int?,
+    ): Int {
+        if (preferredFileIndex != null) {
+            videos.firstOrNull { it.index == preferredFileIndex }?.let { return it.index }
+        }
+        return videos.maxByOrNull { it.size }?.index ?: -1
     }
 
     private fun summarizeContents(info: TorrentInfo): String {
@@ -881,10 +1157,41 @@ class TorrentStreamEngine(context: Context) {
             .ifBlank { "an empty torrent" }
     }
 
-    /**
-     * Picks sibling subtitle files: same name stem as the video first, then the same folder,
-     * then anything else, capped at [MAX_SUBTITLE_FILES].
-     */
+    
+
+
+
+    
+
+
+
+    private fun chooseArtworkIndex(info: TorrentInfo, videoIndex: Int): Int? {
+        val files = info.files()
+        data class Candidate(val index: Int, val score: Int, val size: Long)
+        val candidates = mutableListOf<Candidate>()
+        for (index in 0 until files.numFiles()) {
+            if (index == videoIndex || files.padFileAt(index)) continue
+            val path = files.filePath(index)
+            val extension = path.substringAfterLast('.', "").lowercase()
+            if (extension !in IMAGE_EXTENSIONS) continue
+            val size = files.fileSize(index)
+            if (size < MIN_ARTWORK_BYTES || size > MAX_ARTWORK_BYTES) continue
+            val name = path.substringAfterLast('/').substringAfterLast('\\').lowercase()
+            val score = when {
+                name.contains("poster") || name.contains("cover") ||
+                    name.contains("folder") || name.contains("front") -> 3
+                name.contains("fanart") || name.contains("artwork") ||
+                    name.contains("backdrop") -> 2
+                else -> 1
+            }
+            candidates += Candidate(index, score, size)
+        }
+        return candidates
+            .sortedWith(compareByDescending<Candidate> { it.score }.thenByDescending { it.size })
+            .firstOrNull()
+            ?.index
+    }
+
     private fun chooseSubtitleFiles(info: TorrentInfo, videoIndex: Int): List<Int> {
         val files = info.files()
         val videoPath = files.filePath(videoIndex)
@@ -954,18 +1261,23 @@ class TorrentStreamEngine(context: Context) {
                 lastProgressAt = SystemClock.elapsedRealtime()
             }
             if (elapsed > BUFFERING_TIMEOUT_MILLIS) {
-                throw TorrentFailure("The torrent is taking too long to buffer. Try a source with more peers.")
+                throw TorrentFailure(
+                    "The torrent is taking too long to buffer. Try a source with more peers.",
+                    TorrentFailureKind.TIMEOUT,
+                )
             }
             if (SystemClock.elapsedRealtime() - lastProgressAt > STALL_TIMEOUT_MILLIS) {
+                val noPeers = (status?.numPeers() ?: 0) == 0
                 throw TorrentFailure(
-                    if ((status?.numPeers() ?: 0) == 0) {
+                    if (noPeers) {
                         "No peers were found for this torrent. Check the link or try another source."
                     } else {
                         "Download stalled before playback could start. Please retry."
                     },
+                    if (noPeers) TorrentFailureKind.NO_PEERS else TorrentFailureKind.TIMEOUT,
                 )
             }
-            // Keep the beginning of the file hot while we wait.
+            
             boostInitialWindow(playback.handle, playback.firstPiece, playback.lastPiece)
             delay(500)
         }
@@ -975,6 +1287,15 @@ class TorrentStreamEngine(context: Context) {
         playback: TorrentPlayback,
         myGeneration: Long,
     ) {
+        if (Mp4MetadataInspector.isMp4(playback.fileName)) {
+            awaitFileRange(
+                playback = playback,
+                start = 0L,
+                end = minOf(playback.fileSize, PREFLIGHT_HEAD_BYTES),
+                myGeneration = myGeneration,
+                publishState = false,
+            )
+        }
         val layout = Mp4MetadataInspector.inspect(playback.file, playback.fileSize)
         Log.i(
             "StreamlineTorrent",
@@ -995,6 +1316,7 @@ class TorrentStreamEngine(context: Context) {
                 start = headMoov,
                 end = end,
                 myGeneration = myGeneration,
+                publishState = false,
             )
             return
         }
@@ -1054,6 +1376,7 @@ class TorrentStreamEngine(context: Context) {
             throw TorrentFailure(
                 "This MP4's metadata could not be read. The release may use an unsupported " +
                     "container, or the pieces needed to open it are unavailable. Try another release.",
+                TorrentFailureKind.CONTAINER,
             )
         }
     }
@@ -1063,6 +1386,7 @@ class TorrentStreamEngine(context: Context) {
         start: Long,
         end: Long,
         myGeneration: Long,
+        publishState: Boolean = true,
     ) {
         val firstPiece = pieceForFileOffset(playback, start)
         val lastPiece = pieceForFileOffset(playback, end.coerceAtLeast(start + 1) - 1)
@@ -1079,18 +1403,20 @@ class TorrentStreamEngine(context: Context) {
             val progress = runCatching {
                 playback.handle.fileProgress()[playback.fileIndex]
             }.getOrDefault(0L)
-            _state.value = TorrentState.Buffering(
-                fileName = playback.fileName,
-                progress = 1f,
-                downloadedBytes = progress,
-                totalBytes = playback.fileSize,
-                targetBytes = 0L,
-                downloadRate = status.downloadRate().toLong(),
-                peers = status.numPeers(),
-                seeds = status.numSeeds(),
-                stage = "container metadata",
-                playback = playback,
-            )
+            if (publishState) {
+                _state.value = TorrentState.Buffering(
+                    fileName = playback.fileName,
+                    progress = 1f,
+                    downloadedBytes = progress,
+                    totalBytes = playback.fileSize,
+                    targetBytes = 0L,
+                    downloadRate = status.downloadRate().toLong(),
+                    peers = status.numPeers(),
+                    seeds = status.numSeeds(),
+                    stage = "container metadata",
+                    playback = playback,
+                )
+            }
             delay(200)
             waited += 200
         }
@@ -1116,21 +1442,16 @@ class TorrentStreamEngine(context: Context) {
                     handle.setPieceDeadline(piece, 1_000)
                 }
             }
-            val tailStart = max(firstPiece, lastPiece - INITIAL_PRIORITY_PIECES / 2)
-            for (piece in tailStart..lastPiece) {
-                if (!handle.havePiece(piece)) {
-                    handle.piecePriority(piece, Priority.TOP_PRIORITY)
-                    handle.setPieceDeadline(piece, 1_500)
-                }
-            }
+            
+            
         }
     }
 
-    /**
-     * Sidecars sit wherever the packer put them — often at the far end of the torrent — so their
-     * pieces are boosted next to the video head. Without this the merged subtitle source would hold
-     * up the first frame while waiting for pieces a sequential swarm has not reached yet.
-     */
+    
+
+
+
+
     private fun boostSubtitlePieces(
         handle: TorrentHandle,
         info: TorrentInfo,
@@ -1166,7 +1487,10 @@ class TorrentStreamEngine(context: Context) {
             ?.takeIf { it.isNotBlank() }
     }
 
-    private class TorrentFailure(message: String) : Exception(message)
+    private class TorrentFailure(
+        message: String,
+        val kind: TorrentFailureKind = TorrentFailureKind.UNKNOWN,
+    ) : Exception(message)
 
     private class ResumeSave(
         val infoHash: String,
@@ -1175,10 +1499,18 @@ class TorrentStreamEngine(context: Context) {
     )
 
     private companion object {
-        // ExoPlayer-demuxable containers only. AVI is deliberately excluded: Media3 has no
-        // AVI extractor, so selecting one would guarantee a playback error.
+        const val PREFLIGHT_HEAD_BYTES = 256L * 1024L
+        const val PLAYHEAD_READ_AHEAD_BYTES = 32L * 1024L * 1024L
+        const val MIN_PLAYHEAD_READ_AHEAD_PIECES = 4
+        const val MAX_PLAYHEAD_READ_AHEAD_PIECES = 64
+        
+        
         val VIDEO_EXTENSIONS = setOf("mp4", "mkv", "webm", "m4v", "mov", "ts")
         val SUBTITLE_EXTENSIONS = setOf("srt", "vtt", "ass", "ssa")
+        val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp")
+        const val MIN_ARTWORK_BYTES = 8L * 1024
+        const val MAX_ARTWORK_BYTES = 12L * 1024 * 1024
+        const val ARTWORK_WAIT_TIMEOUT_MS = 15_000L
         const val MAX_SUBTITLE_FILES = 8
         const val MAX_SUBTITLE_FILE_BYTES = 4L * 1024 * 1024
         const val METADATA_TIMEOUT_SECONDS = 45
@@ -1189,8 +1521,8 @@ class TorrentStreamEngine(context: Context) {
         val HEX_INFO_HASH = Regex("[A-F0-9]{40}")
         val BASE32_INFO_HASH = Regex("[A-Z2-7]{32}")
 
-        // Quick-start opening target: a few seconds of media, not a full download buffer. The
-        // player opens during Buffering and continues filling its own larger buffer while playing.
+        
+        
         const val BUFFER_FILE_FRACTION = 0.002
         const val MIN_BUFFER_BYTES = 1L * 1024 * 1024
         const val MAX_BUFFER_BYTES = 6L * 1024 * 1024
@@ -1200,8 +1532,8 @@ class TorrentStreamEngine(context: Context) {
         const val INITIAL_PRIORITY_PIECES = 24
         const val STREAM_UPLOAD_LIMIT_BPS = 512 * 1024
 
-        // Downloaded pieces survive stops, failures and app restarts, keyed by info-hash. The cap
-        // scales with free space so a large remux cannot fill a small device.
+        
+        
         const val CACHE_DIR_PREFIX = "cache-"
         const val RESUME_FILE_NAME = ".fastresume"
         const val RESUME_SAVE_TIMEOUT_MILLIS = 3_000L

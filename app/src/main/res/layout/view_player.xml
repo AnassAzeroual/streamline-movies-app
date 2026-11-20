@@ -1,9 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  TextureView keeps the video inside the regular view hierarchy, which lets Compose draw
-  the custom controller, gradients and gesture HUD above it. A SurfaceView renders in a
-  separate compositor layer on some devices and would sit on top of the Compose controller.
--->
+
 <androidx.media3.ui.PlayerView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"

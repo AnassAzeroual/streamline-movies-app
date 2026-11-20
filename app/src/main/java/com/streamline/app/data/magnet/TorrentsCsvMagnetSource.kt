@@ -16,7 +16,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
 
-/** Torrents-CSV is a public DHT index with a small JSON search API. */
+
 class TorrentsCsvMagnetSource(
     private val client: OkHttpClient,
 ) : MagnetSourceProvider {

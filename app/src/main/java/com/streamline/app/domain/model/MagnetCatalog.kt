@@ -1,8 +1,9 @@
 package com.streamline.app.domain.model
 
+import java.net.URLDecoder
 import java.util.Locale
 
-/** The third-party index a magnet link came from. */
+
 enum class MagnetSource(
     val label: String,
     val tagline: String,
@@ -20,9 +21,10 @@ enum class MagnetSource(
     NYAA("Nyaa", "Anime", supportsLatest = true),
     BTDIGG("BTDigg", "DHT search", requiresQuery = true),
     KICKASS("Kickass", "General", requiresQuery = true),
+    LIME("LimeTorrents", "Movies and TV", requiresQuery = true),
 }
 
-/** One playable magnet for a title. YTS can expose several quality variants. */
+
 data class MagnetRelease(
     val magnetUrl: String,
     val torrentUrl: String? = null,
@@ -36,12 +38,31 @@ data class MagnetRelease(
 
     val displayLabel: String
         get() = videoQuality.displayLabel
+
+    val displayName: String?
+        get() {
+            val raw = magnetUrl.substringAfter("dn=", "")
+            if (raw.isBlank()) return null
+            return runCatching {
+                URLDecoder.decode(raw.substringBefore('&'), "UTF-8")
+            }.getOrNull()?.takeIf { it.isNotBlank() }
+        }
+
+    val isMatroska: Boolean
+        get() = displayName?.endsWith(".mkv", ignoreCase = true) == true
+
+    val containerLabel: String?
+        get() = when {
+            displayName?.endsWith(".mkv", ignoreCase = true) == true -> "MKV"
+            displayName?.endsWith(".mp4", ignoreCase = true) == true -> "MP4"
+            else -> null
+        }
 }
 
-/**
- * One copy-ready release. The archive only carries metadata plus a magnet link; playback begins
- * only when the viewer explicitly hands it to the player.
- */
+
+
+
+
 data class MagnetTitle(
     val id: String,
     val source: MagnetSource,
@@ -116,6 +137,16 @@ data class MagnetTitle(
             posterUrl = posterUrl,
             sourceLabel = source.label,
             quality = chosen?.quality,
+            alternatives = playableReleases()
+                .filter { it.magnetUrl != chosen?.magnetUrl }
+                .map { alternative ->
+                    PlaybackAlternative(
+                        magnetUrl = alternative.magnetUrl,
+                        torrentUrl = alternative.torrentUrl,
+                        quality = alternative.quality,
+                        sourceLabel = source.label,
+                    )
+                },
         )
     }
 }

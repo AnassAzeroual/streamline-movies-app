@@ -19,14 +19,14 @@ import okhttp3.Request
 import java.io.IOException
 import java.net.URLEncoder
 
-/**
- * 1337x has no public API. This provider reads the public search/popular listing, then visits the
- * first few torrent pages for their magnet link and poster. It never downloads a torrent: the
- * output of this class is metadata plus a magnet URI.
- *
- * Cloudflare gates 1337x from many networks. When that happens the provider fails with a clear,
- * user-facing message rather than pretending the index is empty.
- */
+
+
+
+
+
+
+
+
 class X1337MagnetSource(
     private val client: OkHttpClient,
     private val hosts: List<String> = DEFAULT_HOSTS,

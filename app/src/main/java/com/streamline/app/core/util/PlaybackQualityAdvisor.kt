@@ -6,7 +6,7 @@ import android.net.NetworkCapabilities
 import com.streamline.app.domain.model.MagnetRelease
 import com.streamline.app.domain.model.VideoQuality
 
-/** Reads the physical screen and the active network, then applies [QualityRules]. */
+
 object PlaybackQualityAdvisor {
     fun screenQuality(context: Context): VideoQuality {
         val metrics = context.resources.displayMetrics

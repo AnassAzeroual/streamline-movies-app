@@ -9,6 +9,14 @@ enum class DownloadStatus(val label: String, val isActive: Boolean) {
     FAILED("Failed", isActive = false),
 }
 
+data class DownloadFileOption(
+    val index: Int,
+    val path: String,
+    val size: Long,
+    val isVideo: Boolean,
+    val isSubtitle: Boolean,
+)
+
 data class DownloadItem(
     val id: String,
     val title: String,
@@ -16,6 +24,7 @@ data class DownloadItem(
     val posterUrl: String? = null,
     val sourceLabel: String? = null,
     val quality: String? = null,
+    val selectedFileIndexes: List<Int> = emptyList(),
     val addedAt: Long = System.currentTimeMillis(),
     val status: DownloadStatus = DownloadStatus.QUEUED,
     val downloadedBytes: Long = 0L,

@@ -3,7 +3,7 @@ package com.streamline.app.data.magnet
 import java.net.URLEncoder
 import java.util.Locale
 
-/** Builds the paste-ready magnet URI shown by the archive. No tracker is contacted here. */
+
 object MagnetLinks {
     private val INFO_HASH = Regex("^[A-F0-9]{40}$")
 

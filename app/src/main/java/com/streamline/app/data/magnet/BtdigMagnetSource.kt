@@ -15,7 +15,7 @@ import okhttp3.Request
 import java.io.IOException
 import java.util.Locale
 
-/** BTDigg's DHT search returns magnets directly in each result block. */
+
 class BtdigMagnetSource(
     private val client: OkHttpClient,
 ) : MagnetSourceProvider {

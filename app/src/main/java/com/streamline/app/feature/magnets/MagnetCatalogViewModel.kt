@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.streamline.app.core.logging.AppLog
 import com.streamline.app.core.settings.SettingsRepository
 import com.streamline.app.domain.model.LanguageFilter
 import com.streamline.app.domain.model.MagnetPage
@@ -131,8 +132,25 @@ class MagnetCatalogViewModel(
     }
 
     fun onGenreFilterChange(genre: MovieGenre?) {
-        if (_uiState.value.genreFilter == genre) return
-        _uiState.update { it.copy(genreFilter = genre) }
+        val current = _uiState.value
+        if (current.genreFilter == genre) return
+        
+        
+        val switchToAll = genre == MovieGenre.TV_SERIES &&
+            current.source == MagnetSource.YTS
+        _uiState.update {
+            it.copy(
+                genreFilter = genre,
+                source = if (switchToAll) MagnetSource.ALL else it.source,
+            )
+        }
+        if (switchToAll) {
+            AppLog.event(
+                "CATALOG",
+                "tv_source_switch",
+                fields = mapOf("from" to "YTS", "to" to "ALL"),
+            )
+        }
         loadFirstPage()
     }
 
@@ -204,6 +222,12 @@ class MagnetCatalogViewModel(
                 throw cancelled
             } catch (error: Throwable) {
                 if (epoch != requestEpoch) return@launch
+                AppLog.exception(
+                    "CATALOG",
+                    "load_more_failed",
+                    error,
+                    fields = mapOf("source" to snapshot.source.label, "page" to snapshot.page),
+                )
                 _uiState.update {
                     it.copy(isLoadingMore = false, loadMoreError = error.userMessage())
                 }
@@ -234,7 +258,8 @@ class MagnetCatalogViewModel(
                     snapshot.languageFilter.matches(it.title) &&
                     (snapshot.genreFilter == null || snapshot.genreFilter.matches(it))
             }
-            if (matches.isNotEmpty() || !page.hasMore) break
+            val exhaustive = snapshot.genreFilter != null || !snapshot.languageFilter.isAll
+            if ((!exhaustive && matches.isNotEmpty()) || !page.hasMore) break
             pageNumber++
             attempts++
         }
@@ -311,10 +336,26 @@ class MagnetCatalogViewModel(
                         sourceWarnings = page.warnings,
                     )
                 }
+                AppLog.event(
+                    "CATALOG",
+                    "load_success",
+                    fields = mapOf(
+                        "source" to snapshot.source.label,
+                        "query" to snapshot.activeQuery,
+                        "items" to page.items.size,
+                        "warnings" to page.warnings.size,
+                    ),
+                )
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
                 if (epoch != requestEpoch) return@launch
+                AppLog.exception(
+                    "CATALOG",
+                    "load_failed",
+                    error,
+                    fields = mapOf("source" to snapshot.source.label, "query" to snapshot.activeQuery),
+                )
                 _uiState.update {
                     it.copy(
                         isLoading = false,

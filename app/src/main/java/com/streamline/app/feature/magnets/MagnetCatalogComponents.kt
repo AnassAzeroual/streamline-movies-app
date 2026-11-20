@@ -5,11 +5,15 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -39,6 +43,8 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.StarBorder
 import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.MovieFilter
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -57,14 +63,26 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -84,6 +102,7 @@ import com.streamline.app.core.designsystem.ShimmerBlock
 import com.streamline.app.core.designsystem.StreamlineColors
 import com.streamline.app.core.designsystem.StreamlineWordmark
 import com.streamline.app.core.designsystem.isTelevision
+import com.streamline.app.core.tv.TvRemotePlayback
 import com.streamline.app.core.designsystem.tvBarPadding
 import com.streamline.app.core.designsystem.tvTopPadding
 import com.streamline.app.domain.model.LanguageFilter
@@ -95,9 +114,11 @@ import java.util.Locale
 
 @Composable
 fun MagnetTopBar(
+    onOpenFavorites: () -> Unit,
     onOpenDownloads: () -> Unit,
     onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier,
+    initialFocusRequester: FocusRequester? = null,
 ) {
     val isTv = isTelevision()
     Box(
@@ -128,6 +149,21 @@ fun MagnetTopBar(
             StreamlineWordmark(compact = true)
             Spacer(Modifier.weight(1f))
             GlassIconButton(
+                icon = Icons.Rounded.Star,
+                contentDescription = "Favorites",
+                onClick = onOpenFavorites,
+                tint = StreamlineColors.Gold,
+                size = if (isTv) 48.dp else 38.dp,
+                modifier = Modifier.then(
+                    if (initialFocusRequester != null) {
+                        Modifier.focusRequester(initialFocusRequester)
+                    } else {
+                        Modifier
+                    },
+                ),
+            )
+            Spacer(Modifier.width(8.dp))
+            GlassIconButton(
                 icon = Icons.Rounded.Download,
                 contentDescription = "Downloads",
                 onClick = onOpenDownloads,
@@ -155,6 +191,7 @@ fun MagnetArchiveHeader(
     onQueryChange: (String) -> Unit,
     onClearQuery: () -> Unit,
     onRefresh: () -> Unit,
+    initialFocusRequester: FocusRequester? = null,
 ) {
     val isAllYears = state.source == MagnetSource.ALL &&
         !state.isSearching &&
@@ -189,7 +226,7 @@ fun MagnetArchiveHeader(
         else -> "Latest from " + state.source.label
     }
     val searchPlaceholder = if (state.source == MagnetSource.ALL) {
-        "Search all eight sources…"
+        "Search all sources…"
     } else {
         "Search " + state.source.label + " releases…"
     }
@@ -198,6 +235,7 @@ fun MagnetArchiveHeader(
         MagnetSourceSelector(
             selected = state.source,
             onSelected = onSourceSelected,
+            initialFocusRequester = initialFocusRequester,
         )
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -332,6 +370,7 @@ private fun GenreFilterPill(
 private fun MagnetSourceSelector(
     selected: MagnetSource,
     onSelected: (MagnetSource) -> Unit,
+    initialFocusRequester: FocusRequester? = null,
 ) {
     LazyRow(
         modifier = Modifier.fillMaxWidth(),
@@ -344,7 +383,15 @@ private fun MagnetSourceSelector(
             var focused by remember(source) { mutableStateOf(false) }
             Surface(
                 onClick = { onSelected(source) },
-                modifier = Modifier.onFocusChanged { focused = it.isFocused },
+                modifier = Modifier
+                    .then(
+                        if (initialFocusRequester != null && source == MagnetSource.entries.first()) {
+                            Modifier.focusRequester(initialFocusRequester)
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .onFocusChanged { focused = it.isFocused },
                 shape = RoundedCornerShape(50),
                 color = if (isSelected || focused) {
                     accent.copy(alpha = 0.16f)
@@ -392,8 +439,28 @@ private fun MagnetSearchField(
     onQueryChange: (String) -> Unit,
     onClear: () -> Unit,
 ) {
-    var focused by remember { mutableStateOf(false) }
+    val interactionSource = remember { MutableInteractionSource() }
+    val focused by interactionSource.collectIsFocusedAsState()
     val keyboard = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    val focusedState = rememberUpdatedState(focused)
+    DisposableEffect(Unit) {
+        val token = TvRemotePlayback.install { event ->
+            if (
+                focusedState.value &&
+                event.action == android.view.KeyEvent.ACTION_DOWN &&
+                event.keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN
+            ) {
+                val moved = focusManager.moveFocus(FocusDirection.Down)
+                keyboard?.hide()
+                if (!moved) focusManager.clearFocus()
+                true
+            } else {
+                false
+            }
+        }
+        onDispose { TvRemotePlayback.clear(token) }
+    }
     val shape = RoundedCornerShape(15.dp)
     val borderColor by animateColorAsState(
         targetValue = if (focused) {
@@ -407,9 +474,19 @@ private fun MagnetSearchField(
     BasicTextField(
         value = query,
         onValueChange = onQueryChange,
+        interactionSource = interactionSource,
         modifier = Modifier
             .fillMaxWidth()
-            .onFocusChanged { focused = it.isFocused },
+            .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                    val moved = focusManager.moveFocus(FocusDirection.Down)
+                    keyboard?.hide()
+                    if (!moved) focusManager.clearFocus()
+                    true
+                } else {
+                    false
+                }
+            },
         textStyle = MaterialTheme.typography.bodyLarge.copy(color = StreamlineColors.TextPrimary),
         singleLine = true,
         cursorBrush = SolidColor(StreamlineColors.Gold),
@@ -478,8 +555,11 @@ fun MagnetCard(
     onPlay: () -> Unit,
     onDownload: () -> Unit,
     onTrailer: () -> Unit,
+    isFavorite: Boolean,
+    onToggleFavorite: () -> Unit,
     languageFilter: LanguageFilter = LanguageFilter(),
     modifier: Modifier = Modifier,
+    playFocusRequester: FocusRequester? = null,
 ) {
     val accent = sourceAccent(item.source)
     val languageMatch = remember(item.title, languageFilter) {
@@ -560,6 +640,7 @@ fun MagnetCard(
                     contentDescription = "Play in player",
                     tint = accent,
                     onClick = onPlay,
+                    focusRequester = playFocusRequester,
                 )
                 MagnetOverlayButton(
                     icon = Icons.Rounded.Download,
@@ -607,6 +688,15 @@ fun MagnetCard(
                         style = MaterialTheme.typography.labelSmall,
                     )
                 }
+                Spacer(Modifier.width(6.dp))
+                Icon(
+                    imageVector = if (isFavorite) Icons.Rounded.Star else Icons.Rounded.StarBorder,
+                    contentDescription = if (isFavorite) "Remove from favorites" else "Add to favorites",
+                    tint = if (isFavorite) StreamlineColors.Gold else Color.White.copy(alpha = 0.82f),
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clickable(onClick = onToggleFavorite),
+                )
             }
         }
         Column(modifier = Modifier.padding(10.dp)) {
@@ -725,11 +815,15 @@ private fun MagnetOverlayButton(
     tint: Color,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    focusRequester: FocusRequester? = null,
 ) {
     var focused by remember { mutableStateOf(false) }
     val shape = CircleShape
     Box(
         modifier = modifier
+            .then(
+                if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier,
+            )
             .size(if (isTelevision()) 48.dp else 44.dp)
             .onFocusChanged { focused = it.isFocused }
             .clip(shape)
@@ -928,6 +1022,7 @@ private fun sourceAccent(source: MagnetSource): Color = when (source) {
     MagnetSource.NYAA -> Color(0xFFFFB86B)
     MagnetSource.BTDIGG -> Color(0xFF8ED1C8)
     MagnetSource.KICKASS -> StreamlineColors.Coral
+    MagnetSource.LIME -> Color(0xFFE9A6D8)
 }
 
 private fun sourceIcon(source: MagnetSource): ImageVector = when (source) {
@@ -940,4 +1035,5 @@ private fun sourceIcon(source: MagnetSource): ImageVector = when (source) {
     MagnetSource.NYAA -> Icons.Rounded.Animation
     MagnetSource.BTDIGG -> Icons.Rounded.Language
     MagnetSource.KICKASS -> Icons.Rounded.Whatshot
+    MagnetSource.LIME -> Icons.Rounded.MovieFilter
 }

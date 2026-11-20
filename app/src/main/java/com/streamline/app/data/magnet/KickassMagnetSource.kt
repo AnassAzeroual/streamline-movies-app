@@ -19,7 +19,7 @@ import okhttp3.Request
 import java.io.IOException
 import java.net.URLEncoder
 
-/** Kickass search results need a detail-page visit for the magnet and poster. */
+
 class KickassMagnetSource(
     private val client: OkHttpClient,
 ) : MagnetSourceProvider {

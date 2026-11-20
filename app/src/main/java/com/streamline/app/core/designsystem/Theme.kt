@@ -69,7 +69,7 @@ fun StreamlineTheme(
     }
 }
 
-/** Full-screen OLED canvas with a subtle warm bloom behind the top of the content. */
+
 @Composable
 fun CinematicBackground(
     modifier: Modifier = Modifier,

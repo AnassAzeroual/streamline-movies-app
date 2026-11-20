@@ -4,16 +4,16 @@ import org.libtorrent4j.AnnounceEntry
 import org.libtorrent4j.TorrentHandle
 import java.net.URLEncoder
 
-/**
- * Shared peer-discovery configuration for both libtorrent sessions (streaming + downloads).
- *
- * Web seeds embedded in torrent metadata are used automatically: since libtorrent 2.x they live
- * in the torrent info dictionary and are picked up when the torrent is added, so no explicit
- * `addWebSeed` call is needed (the libtorrent4j wrapper does not expose one either).
- */
+
+
+
+
+
+
+
 object TrackerLists {
 
-    /** Curated from the well-known public tracker lists; UDP first, HTTPS fallbacks last. */
+    
     val PUBLIC_TRACKERS: List<String> = listOf(
         "udp://tracker.opentrackr.org:1337/announce",
         "udp://open.stealth.si:80/announce",
@@ -64,7 +64,7 @@ object TrackerLists {
             "dht.transmissionbt.com:6881,router.bitcomet.com:6881," +
             "dht.libtorrent.org:25401"
 
-    /** Appends any tracker from [PUBLIC_TRACKERS] that the magnet does not already carry. */
+    
     fun withTrackers(magnet: String): String {
         if (!magnet.startsWith("magnet:", ignoreCase = true)) return magnet
         val missing = PUBLIC_TRACKERS.filterNot { tracker ->
@@ -77,7 +77,7 @@ object TrackerLists {
         }
     }
 
-    /** Adds the public trackers to a live handle and forces an immediate announce everywhere. */
+    
     fun addPeerDiscoveryTrackers(handle: TorrentHandle) {
         PUBLIC_TRACKERS.forEach { url ->
             runCatching { handle.addTracker(AnnounceEntry(url)) }

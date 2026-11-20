@@ -42,6 +42,7 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Replay10
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Subtitles
+import androidx.compose.material.icons.rounded.VideoLibrary
 import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.material.icons.rounded.BrightnessHigh
 import androidx.compose.material3.CircularProgressIndicator
@@ -62,8 +63,12 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
@@ -114,17 +119,25 @@ fun PlayerControlsOverlay(
     onSeekTo: (Long) -> Unit,
     onToggleMute: () -> Unit,
     onOpenTracks: () -> Unit,
+    onOpenVideos: (() -> Unit)? = null,
     onToggleStats: () -> Unit,
     onToggleFullscreen: () -> Unit,
     onInteraction: () -> Unit,
     modifier: Modifier = Modifier,
+    initialFocusRequester: FocusRequester? = null,
+    onControlsFocusChanged: (Boolean) -> Unit = {},
+    onPlayFocusChanged: (Boolean) -> Unit = {},
 ) {
     var previewPosition by remember { mutableStateOf<Long?>(null) }
     val shownPosition = previewPosition ?: positionMs
     val playedFraction = getFraction(shownPosition, durationMs)
     val bufferedFraction = getFraction(bufferedMs, durationMs)
 
-    Box(modifier = modifier.fillMaxSize()) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .onFocusChanged { onControlsFocusChanged(it.hasFocus) },
+    ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -217,11 +230,31 @@ fun PlayerControlsOverlay(
                 },
                 size = 50.dp,
             )
+            var playFocused by remember { mutableStateOf(false) }
             Box(
                 modifier = Modifier
+                    .then(
+                        if (initialFocusRequester != null) {
+                            Modifier.focusRequester(initialFocusRequester)
+                        } else {
+                            Modifier
+                        },
+                    )
                     .size(72.dp)
+                    .onFocusChanged {
+                        playFocused = it.isFocused
+                        onPlayFocusChanged(it.isFocused)
+                    }
                     .clip(CircleShape)
-                    .background(StreamlineColors.Gold)
+                    .background(
+                        if (playFocused) StreamlineColors.Gold.copy(alpha = 0.22f)
+                        else Color.Black.copy(alpha = 0.52f),
+                    )
+                    .border(
+                        if (playFocused) 2.dp else 1.dp,
+                        if (playFocused) StreamlineColors.Gold else StreamlineColors.Gold.copy(alpha = 0.55f),
+                        CircleShape,
+                    )
                     .clickable {
                         onInteraction()
                         onTogglePlay()
@@ -231,14 +264,14 @@ fun PlayerControlsOverlay(
                 if (isBuffering) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(27.dp),
-                        color = StreamlineColors.Ink,
+                        color = StreamlineColors.Gold,
                         strokeWidth = 2.4.dp,
                     )
                 } else {
                     Icon(
                         imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                         contentDescription = if (isPlaying) "Pause" else "Play",
-                        tint = StreamlineColors.Ink,
+                        tint = StreamlineColors.Gold,
                         modifier = Modifier.size(34.dp),
                     )
                 }
@@ -325,22 +358,38 @@ fun PlayerControlsOverlay(
                     size = 38.dp,
                     filled = true,
                 )
-                PlayerTextButton(
-                    text = "${formatSpeed(speed)}×",
+                PlayerCircleButton(
                     icon = Icons.Rounded.Speed,
+                    contentDescription = "Playback speed",
                     onClick = {
                         onInteraction()
                         onOpenTracks()
                     },
+                    size = 38.dp,
+                    filled = true,
                 )
-                PlayerTextButton(
-                    text = "Audio & subtitles",
+                PlayerCircleButton(
                     icon = Icons.Rounded.Subtitles,
+                    contentDescription = "Audio and subtitles",
                     onClick = {
                         onInteraction()
                         onOpenTracks()
                     },
+                    size = 38.dp,
+                    filled = true,
                 )
+                if (onOpenVideos != null) {
+                    PlayerCircleButton(
+                        icon = Icons.Rounded.VideoLibrary,
+                        contentDescription = "Choose video file",
+                        onClick = {
+                            onInteraction()
+                            onOpenVideos()
+                        },
+                        size = 38.dp,
+                        filled = true,
+                    )
+                }
             }
         }
     }
@@ -355,11 +404,22 @@ private fun PlayerCircleButton(
     size: androidx.compose.ui.unit.Dp = 44.dp,
     filled: Boolean = false,
 ) {
+    var focused by remember { mutableStateOf(false) }
     Box(
         modifier = modifier
             .size(size)
+            .onFocusChanged { focused = it.isFocused }
             .clip(CircleShape)
-            .background(if (filled) Color.White.copy(alpha = 0.09f) else Color.Transparent)
+            .background(
+                if (focused) StreamlineColors.Gold.copy(alpha = 0.22f)
+                else if (filled) Color.White.copy(alpha = 0.09f)
+                else Color.Transparent,
+            )
+            .border(
+                width = if (focused) 2.dp else 0.dp,
+                color = if (focused) StreamlineColors.Gold else Color.Transparent,
+                shape = CircleShape,
+            )
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
@@ -368,35 +428,6 @@ private fun PlayerCircleButton(
             contentDescription = contentDescription,
             tint = Color.White.copy(alpha = 0.94f),
             modifier = Modifier.size(if (size > 50.dp) 27.dp else 23.dp),
-        )
-    }
-}
-
-@Composable
-private fun PlayerTextButton(
-    text: String,
-    icon: ImageVector,
-    onClick: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(Color.White.copy(alpha = 0.07f))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 11.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = StreamlineColors.TextSecondary,
-            modifier = Modifier.size(15.dp),
-        )
-        Text(
-            text = text,
-            color = StreamlineColors.TextPrimary,
-            style = MaterialTheme.typography.labelMedium,
         )
     }
 }
@@ -613,6 +644,8 @@ fun TorrentPreparationOverlay(
     firstFramePending: Boolean = false,
     onBack: () -> Unit,
     onRetry: () -> Unit,
+    hasAlternativeStreams: Boolean,
+    onChooseAlternative: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val heading: String
@@ -652,8 +685,8 @@ fun TorrentPreparationOverlay(
             } else {
                 "Buffering the opening seconds. Playback starts as soon as the first frame is ready."
             }
-            // Read-ahead can download well past the opening target. Do not show "20 MB of 2 MB";
-            // the opening target is a readiness threshold, not a download cap.
+            
+            
             val openingTarget = state.targetBytes.coerceAtLeast(1L)
             val openingReady = state.downloadedBytes.coerceAtMost(openingTarget)
             stats = buildString {
@@ -844,11 +877,25 @@ fun TorrentPreparationOverlay(
             }
             Spacer(Modifier.height(24.dp))
             if (failed) {
-                PrimaryActionButton(
-                    text = "Back to library",
-                    onClick = onBack,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                if (hasAlternativeStreams) {
+                    PrimaryActionButton(
+                        text = "Choose another stream",
+                        onClick = onChooseAlternative,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    SecondaryActionButton(
+                        text = "Back to library",
+                        onClick = onBack,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else {
+                    PrimaryActionButton(
+                        text = "Back to library",
+                        onClick = onBack,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 if (fatalError == null) {
                     Spacer(Modifier.height(8.dp))
                     SecondaryActionButton(
@@ -881,13 +928,15 @@ fun PlayerErrorOverlay(
     message: String,
     onRetry: () -> Unit,
     onBack: () -> Unit,
+    hasAlternativeStreams: Boolean,
+    onChooseAlternative: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(Color.Black.copy(alpha = 0.84f))
-            .clickable(onClick = {}),
+            .pointerInput(Unit) { detectTapGestures { } },
         contentAlignment = Alignment.Center,
     ) {
         Column(
@@ -917,14 +966,14 @@ fun PlayerErrorOverlay(
             )
             Spacer(Modifier.height(22.dp))
             PrimaryActionButton(
-                text = "Try again",
-                onClick = onRetry,
+                text = if (hasAlternativeStreams) "Choose another stream" else "Try again",
+                onClick = if (hasAlternativeStreams) onChooseAlternative else onRetry,
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(8.dp))
             SecondaryActionButton(
-                text = "Back to library",
-                onClick = onBack,
+                text = if (hasAlternativeStreams) "Try this stream again" else "Back to library",
+                onClick = if (hasAlternativeStreams) onRetry else onBack,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -1140,12 +1189,21 @@ private fun TrackOptionRow(
     option: TrackOption,
     onClick: () -> Unit,
 ) {
+    var focused by remember { mutableStateOf(false) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .onFocusChanged { focused = it.isFocused }
             .clip(RoundedCornerShape(11.dp))
             .background(
-                if (option.selected) StreamlineColors.Gold.copy(alpha = 0.09f) else Color.Transparent,
+                if (focused) StreamlineColors.Gold.copy(alpha = 0.16f)
+                else if (option.selected) StreamlineColors.Gold.copy(alpha = 0.09f)
+                else Color.Transparent,
+            )
+            .border(
+                width = if (focused) 2.dp else 0.dp,
+                color = if (focused) StreamlineColors.Gold else Color.Transparent,
+                shape = RoundedCornerShape(11.dp),
             )
             .clickable(enabled = option.supported, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 11.dp),
@@ -1202,7 +1260,7 @@ private fun formatDelta(deltaMs: Long): String {
     }
 }
 
-/** Brightness/volume/seek gestures drawn over the player surface, below the controls. */
+
 @Composable
 fun PlayerGestureLayer(
     currentPositionMs: () -> Long,
@@ -1340,7 +1398,17 @@ private enum class GestureMode { NONE, UNDECIDED, SEEK, VOLUME, BRIGHTNESS }
 
 private const val SEEK_GESTURE_SPAN_MS = 120_000f
 
-/** Live swarm + renderer telemetry, polled while the stats control is on. */
+
+data class PieceMap(
+    val downloaded: BooleanArray,
+    val currentIndex: Int = -1,
+) {
+    val downloadedCount: Int get() = downloaded.count { it }
+    val progress: Float
+        get() = if (downloaded.isEmpty()) 0f else downloadedCount.toFloat() / downloaded.size
+}
+
+
 data class StreamStats(
     val seeds: Int,
     val peers: Int,
@@ -1350,6 +1418,7 @@ data class StreamStats(
     val videoFormat: String?,
     val droppedFrames: Int,
     val bufferedAheadMs: Long,
+    val pieceMap: PieceMap? = null,
 )
 
 @Composable
@@ -1369,9 +1438,69 @@ fun PlayerStatsOverlay(
         StatsRow("Download", formatBytes(stats.downloadRate) + "/s")
         StatsRow("Upload", formatBytes(stats.uploadRate) + "/s")
         StatsRow("Wanted", (stats.progress * 100).roundToInt().toString() + "%")
+        stats.pieceMap?.let { pieces ->
+            Spacer(Modifier.height(5.dp))
+            Text(
+                text = "PIECES",
+                color = StreamlineColors.TextTertiary,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = 9.sp,
+                    letterSpacing = 1.2.sp,
+                ),
+            )
+            Spacer(Modifier.height(4.dp))
+            PieceProgressBar(pieces)
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = pieces.downloadedCount.toString() + " / " + pieces.downloaded.size +
+                    " · " + (pieces.progress * 100).roundToInt() + "%" +
+                    (pieces.currentIndex.takeIf { it >= 0 }
+                        ?.let { " · playhead " + (it + 1) }
+                        ?: ""),
+                color = StreamlineColors.TextTertiary,
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+            )
+            Text(
+                text = "green = downloaded · gold = playhead",
+                color = StreamlineColors.TextTertiary.copy(alpha = 0.7f),
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp),
+            )
+        }
         StatsRow("Buffer", formatPlaybackTime(stats.bufferedAheadMs) + " ahead")
         stats.videoFormat?.let { StatsRow("Video", it) }
         StatsRow("Dropped", stats.droppedFrames.toString() + " frames")
+    }
+}
+
+@Composable
+private fun PieceProgressBar(pieces: PieceMap) {
+    Canvas(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(16.dp)
+            .clip(RoundedCornerShape(4.dp)),
+    ) {
+        if (pieces.downloaded.isEmpty()) return@Canvas
+        drawRect(color = Color.White.copy(alpha = 0.08f))
+        val slot = size.width / pieces.downloaded.size
+        val segmentWidth = slot.coerceAtLeast(0.8f)
+        pieces.downloaded.forEachIndexed { index, downloaded ->
+            if (downloaded) {
+                drawRect(
+                    color = Color(0xFF6DDC8A),
+                    topLeft = Offset(index * slot, 0f),
+                    size = Size(segmentWidth, size.height),
+                )
+            }
+        }
+        val current = pieces.currentIndex
+        if (current in pieces.downloaded.indices) {
+            drawRect(
+                color = StreamlineColors.Gold,
+                topLeft = Offset(current * slot, 0f),
+                size = Size(segmentWidth.coerceAtLeast(2f), size.height),
+            )
+        }
     }
 }
 

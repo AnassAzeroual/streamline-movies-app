@@ -71,5 +71,7 @@ class MagnetTitleTest {
 
         assertEquals("magnet:?xt=urn:btih:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", request.magnetUrl)
         assertEquals("2160p", request.quality)
+        assertEquals(1, request.alternatives.size)
+        assertEquals("1080p", request.alternatives.single().quality)
     }
 }

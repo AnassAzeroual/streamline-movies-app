@@ -7,6 +7,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
+import com.streamline.app.core.logging.AppLog
 import androidx.media3.datasource.TransferListener
 import org.libtorrent4j.Priority
 import java.io.IOException
@@ -14,10 +15,10 @@ import java.io.RandomAccessFile
 import kotlin.math.max
 import kotlin.math.min
 
-/**
- * Routes Media3 opens to the right file inside the torrent: the video stream for the main URI and
- * sideloaded subtitle streams for `streamline-torrent://subtitle/<index>` URIs.
- */
+
+
+
+
 @UnstableApi
 class TorrentDataSourceFactory(
     private val playback: TorrentPlayback,
@@ -67,18 +68,19 @@ private class RoutingTorrentDataSource(
     }
 }
 
-/**
- * A Media3 [DataSource] backed by a live libtorrent file.
- *
- * Media3 asks for ranges as it demuxes; a read blocks until the corresponding torrent piece has
- * passed verification. Seeking also re-prioritises pieces around the new position.
- */
+
+
+
+
+
+
 @UnstableApi
 class TorrentDataSource(
     private val stream: TorrentFileStream,
 ) : BaseDataSource(false) {
     private var file: RandomAccessFile? = null
     private var position: Long = 0
+    private var readSeekGeneration: Long = 0
     private var bytesRemaining: Long = 0
     private var uri: Uri? = null
     private var lastPriorityAt: Long = 0
@@ -86,17 +88,21 @@ class TorrentDataSource(
     private var priorityEnd: Int? = null
     @Volatile private var closed = false
 
-    // Scale the request window to the piece size: ~32 MB of read-ahead regardless of whether the
-    // torrent uses 512 KB pieces (old rips) or 8-16 MB pieces (4K remuxes).
+    
+    
     private val readAheadPieces = (READ_AHEAD_BYTES / stream.pieceLength.coerceAtLeast(1))
         .toInt()
         .coerceIn(MIN_READ_AHEAD_PIECES, MAX_READ_AHEAD_PIECES)
 
-    /**
-     * Tiny files (subtitle sidecars) get a short wait. They are merged with the video source, so a
-     * sidecar stuck behind a cold swarm would otherwise hold up the first frame; the loader treats
-     * the resulting failure as end-of-stream and playback continues without subtitles.
-     */
+    
+    private val isAuxiliary = stream.fileSize <= AUXILIARY_STREAM_BYTES ||
+        stream.lastPiece - stream.firstPiece <= SMALL_STREAM_PIECES
+
+    
+
+
+
+
     private val waitTimeoutMillis = if (stream.fileSize <= AUXILIARY_STREAM_BYTES) {
         AUXILIARY_WAIT_TIMEOUT_MILLIS
     } else {
@@ -122,6 +128,21 @@ class TorrentDataSource(
         accessFile.seek(dataSpec.position)
         file = accessFile
         position = dataSpec.position
+        readSeekGeneration = stream.seekGeneration
+        val targetPiece = pieceForFileOffset(position)
+        val targetCached = runCatching {
+            stream.handle.havePiece(targetPiece)
+        }.getOrDefault(false)
+        AppLog.event(
+            "DATA",
+            "seek_open",
+            fields = mapOf(
+                "position" to position,
+                "piece" to targetPiece,
+                "cached" to targetCached,
+                "fileSize" to stream.fileSize,
+            ),
+        )
         bytesRemaining = if (dataSpec.length == C.LENGTH_UNSET.toLong()) {
             stream.fileSize - dataSpec.position
         } else {
@@ -129,7 +150,7 @@ class TorrentDataSource(
         }
         closed = false
         if (stream.lastPiece - stream.firstPiece <= SMALL_STREAM_PIECES) {
-            // Small sidecars (subtitles): fetch the whole file at once.
+            
             prioritizeRange(stream.firstPiece, stream.lastPiece)
         } else {
             prioritizeAround(pieceForFileOffset(position), force = true)
@@ -147,6 +168,9 @@ class TorrentDataSource(
         val pieceIndex = (absoluteOffset / stream.pieceLength).toInt()
             .coerceIn(stream.firstPiece, stream.lastPiece)
         awaitPiece(pieceIndex)
+        if (stream.seekGeneration != readSeekGeneration) {
+            throw IOException("Player seek interrupted the torrent read.")
+        }
 
         val pieceStart = pieceIndex.toLong() * stream.pieceLength
         val offsetInPiece = absoluteOffset - pieceStart
@@ -185,28 +209,61 @@ class TorrentDataSource(
         if (error != null) throw error
     }
 
-    private fun pieceForFileOffset(offset: Long): Int {
-        if (stream.pieceLength <= 0) return stream.firstPiece
-        return ((stream.fileTorrentOffset + offset.coerceIn(0, stream.fileSize)) / stream.pieceLength)
-            .toInt()
-            .coerceIn(stream.firstPiece, stream.lastPiece)
-    }
+    private fun pieceForFileOffset(offset: Long): Int =
+        stream.timeline(0L).pieceForOffset(offset)
 
     private fun awaitPiece(pieceIndex: Int) {
         val deadline = SystemClock.elapsedRealtime() + waitTimeoutMillis
+        val waitStartedAt = SystemClock.elapsedRealtime()
+        var waitLogged = false
         while (!closed) {
+            if (Thread.currentThread().isInterrupted) {
+                throw IOException("Torrent read was interrupted.")
+            }
+            if (stream.seekGeneration != readSeekGeneration) {
+                throw IOException("Player seek interrupted the torrent read.")
+            }
             if (stream.pieceWaiter.isCancelled()) {
                 throw IOException("Torrent playback was stopped.")
             }
-            if (runCatching { stream.handle.havePiece(pieceIndex) }.getOrDefault(false)) return
+            if (runCatching { stream.handle.havePiece(pieceIndex) }.getOrDefault(false)) {
+                if (waitLogged) {
+                    AppLog.event(
+                        "DATA",
+                        "piece_wait_done",
+                        fields = mapOf(
+                            "piece" to pieceIndex,
+                            "waitedMs" to (SystemClock.elapsedRealtime() - waitStartedAt),
+                        ),
+                    )
+                }
+                return
+            }
+            if (!waitLogged) {
+                waitLogged = true
+                AppLog.warn(
+                    "DATA",
+                    "piece_wait_start",
+                    fields = mapOf(
+                        "piece" to pieceIndex,
+                        "position" to position,
+                    ),
+                )
+            }
             val remaining = deadline - SystemClock.elapsedRealtime()
             if (remaining <= 0L) {
                 throw IOException("Timed out waiting for torrent pieces. Check peer availability.")
             }
             prioritizeAround(pieceIndex, force = false)
-            // The libtorrent piece alert wakes this wait immediately. The bounded wait is a
-            // safety net for a missed alert or a session that is still starting up.
+            
+            
             stream.pieceWaiter.await(pieceIndex, minOf(remaining, 500L))
+            if (Thread.currentThread().isInterrupted) {
+                throw IOException("Torrent read was interrupted.")
+            }
+            if (stream.seekGeneration != readSeekGeneration) {
+                throw IOException("Player seek interrupted the torrent read.")
+            }
         }
         throw IOException("Torrent playback was stopped.")
     }
@@ -214,7 +271,12 @@ class TorrentDataSource(
     private fun prioritizeAround(startPiece: Int, force: Boolean) {
         val now = SystemClock.elapsedRealtime()
         if (!force && now - lastPriorityAt < PRIORITY_REFRESH_MILLIS) return
-        prioritizeRange(startPiece, min(stream.lastPiece, startPiece + readAheadPieces), now)
+        
+        
+        val playhead = stream.playheadPiece.takeIf { it in stream.firstPiece..stream.lastPiece }
+        val first = if (playhead != null) minOf(playhead, startPiece) else startPiece
+        val end = if (playhead != null) maxOf(playhead, startPiece) else startPiece
+        prioritizeRange(first, min(stream.lastPiece, end + readAheadPieces), now)
     }
 
     private fun prioritizeRange(
@@ -227,22 +289,32 @@ class TorrentDataSource(
             stream.handle.resume()
             val first = max(stream.firstPiece, startPiece)
             val last = min(stream.lastPiece, endPiece)
-            val oldStart = priorityStart
-            val oldEnd = priorityEnd
-            if (oldStart != null && oldEnd != null) {
-                for (piece in oldStart..oldEnd) {
-                    if (piece !in first..last && !stream.handle.havePiece(piece)) {
-                        runCatching { stream.handle.piecePriority(piece, Priority.DEFAULT) }
+            
+            
+            
+            if (!isAuxiliary) {
+                for (piece in stream.firstPiece..stream.lastPiece) {
+                    if (
+                        piece !in first..last &&
+                        piece !in stream.protectedPieces &&
+                        !stream.handle.havePiece(piece)
+                    ) {
+                        runCatching { stream.handle.piecePriority(piece, Priority.IGNORE) }
                     }
                 }
             }
             priorityStart = first
             priorityEnd = last
-            runCatching { stream.handle.setSequentialRange(first, stream.lastPiece) }
+            runCatching { stream.handle.setSequentialRange(first, last) }
             for (piece in first..last) {
                 if (!stream.handle.havePiece(piece)) {
-                    stream.handle.piecePriority(piece, Priority.TOP_PRIORITY)
-                    stream.handle.setPieceDeadline(piece, 1_000)
+                    runCatching {
+                        stream.handle.piecePriority(piece, Priority.TOP_PRIORITY)
+                        
+                        
+                        val deadlineMs = if (piece <= first + 3) 800 else 1_500
+                        stream.handle.setPieceDeadline(piece, deadlineMs)
+                    }
                 }
             }
         }
@@ -270,10 +342,10 @@ class TorrentDataSource(
         const val MIN_READ_AHEAD_PIECES = 4
         const val MAX_READ_AHEAD_PIECES = 64
 
-        // Streams this small (subtitle sidecars) are boosted in full on open.
+        
         const val SMALL_STREAM_PIECES = 32
 
-        // Anything at or below this size is a sidecar, never the feature video.
+        
         const val AUXILIARY_STREAM_BYTES = 8L * 1024 * 1024
         const val AUXILIARY_WAIT_TIMEOUT_MILLIS = 15_000L
     }

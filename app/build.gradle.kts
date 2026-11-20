@@ -7,8 +7,8 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-// Production signing material is machine-local and gitignored. Builds still work without it
-// (the release artifact is simply left unsigned), so fresh clones and CI do not need the key.
+
+
 val releaseKeystoreDir = File(rootProject.projectDir, ".key_store")
 val releaseSigningPropertiesFile = File(releaseKeystoreDir, "keystore.properties")
 val releaseSigningProperties = Properties().apply {
@@ -47,7 +47,7 @@ android {
                 storePassword = releaseSigningProperties.getProperty("storePassword")
                 keyAlias = releaseSigningProperties.getProperty("keyAlias")
                 keyPassword = releaseSigningProperties.getProperty("keyPassword")
-                // minSdk 26 does not need v1/JAR signing; v2/v3 enable modern verification.
+                
                 enableV1Signing = false
                 enableV2Signing = true
                 enableV3Signing = true
@@ -69,6 +69,14 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+        }
+        create("diagnostic") {
+            initWith(getByName("release"))
+            isDebuggable = true
+            applicationIdSuffix = null
+            versionNameSuffix = "-diag"
+            signingConfig = signingConfigs.findByName("release")
+            matchingFallbacks += listOf("release")
         }
     }
 
@@ -99,8 +107,8 @@ kotlin {
     }
 }
 
-// Newer AndroidX releases pull a Kotlin stdlib beyond the compiler bundled with AGP 9.
-// Pin it to the compiler's version so the compiler can read its own runtime.
+
+
 val kotlinVersion = libs.versions.kotlin.get()
 configurations.configureEach {
     resolutionStrategy {

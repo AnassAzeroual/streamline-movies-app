@@ -9,10 +9,10 @@ import com.streamline.app.domain.model.MagnetSource
 import com.streamline.app.domain.model.MagnetTitle
 import java.util.Locale
 
-/**
- * Tolerant reader for the YTS "list_movies" payload. YTS mirrors have drifted between snake_case
- * and camelCase over the years, so every field is optional.
- */
+
+
+
+
 object YtsResponseParser {
     const val PAGE_SIZE = 24
     private const val MAX_PAGE = 200

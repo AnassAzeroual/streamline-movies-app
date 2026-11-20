@@ -19,6 +19,14 @@ class TorrentTextTest {
     }
 
     @Test
+    fun `detects av1 releases`() {
+        assertTrue(TorrentText.isAv1("Demon Slayer S01-05 BD 1080p AV1"))
+        assertTrue(TorrentText.isAv1("Movie 2026 2160p AV01 10bit"))
+        assertFalse(TorrentText.isAv1("Movie 2026 1080p x265 HEVC"))
+        assertFalse(TorrentText.isAv1("A Royal Christmas Secret 1080p x264"))
+    }
+
+    @Test
     fun `recognizes video categories`() {
         assertTrue(TorrentText.isVideoCategory("Movies / HD"))
         assertTrue(TorrentText.isVideoCategory("TV / HD"))

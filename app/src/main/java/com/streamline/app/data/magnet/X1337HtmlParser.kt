@@ -2,11 +2,11 @@ package com.streamline.app.data.magnet
 
 import java.util.Locale
 
-/**
- * Small, dependency-free reader for 1337x's search and torrent pages. The site has no public API,
- * so the archive treats every field as best-effort and simply drops rows that cannot yield a
- * magnet link.
- */
+
+
+
+
+
 object X1337HtmlParser {
     data class Row(
         val path: String,

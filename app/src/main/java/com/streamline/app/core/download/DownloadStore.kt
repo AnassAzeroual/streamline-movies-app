@@ -3,7 +3,7 @@ package com.streamline.app.core.download
 import android.content.Context
 import com.google.gson.Gson
 
-/** Small JSON store for the download queue. Kept separate from the torrent session. */
+
 internal class DownloadStore(context: Context) {
     private val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
     private val gson = Gson()

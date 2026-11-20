@@ -15,7 +15,7 @@ import okhttp3.Request
 import java.io.IOException
 import java.util.Locale
 
-/** Nyaa's RSS feed carries info hashes, so magnets can be built without a detail page. */
+
 class NyaaMagnetSource(
     private val client: OkHttpClient,
 ) : MagnetSourceProvider {
